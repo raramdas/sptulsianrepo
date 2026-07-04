@@ -1,0 +1,8 @@
+From here on, your workflow for any future change is simply:
+
+I give you updated files
+cp them into ~/stockbot/..., then git add -A && git commit -m "..." && git push
+Check https://github.com/raramdas/sptulsianrepo/actions for the green checkmark (30 tests passing)
+On the VM: cd /home/ubuntu/stockbot && ./deploy.sh
+
+No more manual scp-ing individual files, no more guessing whether the dashboard needs a restart — the script figures that out from what actually changed.
