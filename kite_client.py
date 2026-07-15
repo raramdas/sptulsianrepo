@@ -84,7 +84,11 @@ def _normalize_name(name):
 
 def _load_instrument_cache():
     """Download and parse Kite's NSE instrument list using a proper CSV parser,
-    keeping only EQ (equity) instruments to avoid matching against bonds/SDLs/ETFs."""
+    keeping only EQ (equity) instruments to avoid matching against bonds/SDLs/ETFs.
+    Indexed by BOTH normalized company name (e.g. "cdsl" from "Central
+    Depository Services...") AND the raw ticker symbol itself (e.g. "cdsl"
+    from tradingsymbol "CDSL") — so a tip that names the stock either way
+    resolves via EXACT match instead of falling through to fuzzy matching."""
     global _instrument_cache
     if _instrument_cache is not None:
         return _instrument_cache
@@ -100,7 +104,8 @@ def _load_instrument_cache():
             if not sym or not name:
                 continue
             _instrument_cache[_normalize_name(name)] = sym
-        log(f"  Loaded {len(_instrument_cache)} equity instruments")
+            _instrument_cache.setdefault(sym.lower(), sym)  # don't clobber a name-based match with the same key
+        log(f"  Loaded {len(_instrument_cache)} equity instruments (indexed by name + symbol)")
     except Exception as e:
         log(f"  Instrument list error: {e}")
     return _instrument_cache
