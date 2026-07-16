@@ -68,6 +68,7 @@ SYMBOL_MAP = {
     'solar industries':     'SOLARINDS',
     'zen tech':             'ZENTEC',
     'cg power':             'CGPOWER',      # ADDED — was missing entirely, fell through to fuzzy match
+    'billionbrains':        'GROWW',        # ADDED — Billionbrains Garage Ventures Ltd (Groww's parent), verified via NSE India
 }
 
 _instrument_cache = None  # normalized_name -> symbol, EQUITY ONLY
