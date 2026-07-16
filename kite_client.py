@@ -233,13 +233,22 @@ def place_gtt(symbol, qty, target_price, last_price, enctoken):
     trigger_price = Rs 0.10 below target (fires just before the price reaches target)
     limit sell price = target_price (the actual sell price)
 
-    Kite requires that for a sell GTT, last_price must be BELOW the trigger_price.
-    If we couldn't fetch a real market price, derive a safe last_price below trigger.
+    Kite requires last_price to differ from trigger_price by MORE THAN 0.25%
+    (and, for a sell GTT, last_price must be below trigger_price). We use a
+    0.5% margin — safely above Kite's 0.25% floor — rather than a flat rupee
+    amount, since a flat Rs 0.10 gap is well under 0.25% for almost any stock
+    priced above ~Rs 40, which is exactly what caused "Trigger price was too
+    close to the last price" errors once GTT_OFFSET became Rs 0.10 instead of
+    the old 3%-of-target gap.
     """
     GTT_OFFSET = 0.10
     trigger_price = round(target_price - GTT_OFFSET, 2)
-    if not last_price or last_price >= trigger_price:
-        last_price = round(trigger_price - 0.10, 2)
+    min_gap = round(trigger_price * 0.005, 2)  # 0.5% margin, above Kite's 0.25% minimum
+    if not last_price or (trigger_price - last_price) < min_gap:
+        original = last_price
+        last_price = round(trigger_price - min_gap, 2)
+        log(f"  Adjusted last_price from {original} to {last_price} "
+            f"(needed >0.25% gap from trigger {trigger_price}, using 0.5% margin)")
     log(f"  GTT: trigger={trigger_price} limit={target_price} last_price={last_price}")
     orders = json.dumps([{
         'exchange': EXCHANGE, 'tradingsymbol': symbol,
