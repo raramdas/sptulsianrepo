@@ -122,6 +122,22 @@ def run():
         ltp = get_market_price(stock, enctoken, kite_symbol=symbol)
         log(f"  symbol={symbol} | target={target} | qty={qty} | ltp={ltp}")
 
+        # Sanity check: a legitimate target should be modestly above the
+        # current/buy price, not wildly different. A large mismatch here is
+        # a strong signal the symbol is WRONG (e.g. a stale, pre-fix symbol
+        # sitting in the sheet from before symbol resolution was tightened)
+        # — CDSL vs ICDSLTD is exactly this: two unrelated companies, prices
+        # off by ~36x. Never auto-retry a GTT in that situation.
+        if ltp and ltp > 0:
+            ratio = target / ltp
+            if ratio > 3 or ratio < 0.33:
+                log(f"  ⚠ SANITY CHECK FAILED: target/ltp ratio = {ratio:.1f}x — "
+                    f"this looks like the WRONG SYMBOL, not a normal price gap. "
+                    f"Skipping — check this row's Symbol column and actual Kite holdings manually.")
+                skipped += 1
+                retried -= 1
+                continue
+
         if DRY_RUN:
             log(f"  [DRY RUN] Would retry GTT SELL {qty} x {symbol} @ target {target}")
             succeeded += 1
