@@ -51,7 +51,7 @@ from datetime import datetime
 from config import log, IST
 from kite_client import get_enctoken, place_gtt, get_market_price, kite_headers
 from budget_manager import get_stock_cap_type, close_oracle_connection
-from sheet_gtt_updater import get_worksheet
+from sheet_gtt_updater import get_worksheet, get_sheet_rows, COL_CATEGORY, COL_SYMBOL, COL_GTT_STATUS
 import requests
 
 ORDERS_CSV = 'reconciliation_report.csv'
@@ -165,6 +165,19 @@ def append_reconciliation_row(ws, o, gtt_id, gtt_status, cap_type, today_str):
     ])
 
 
+def get_already_reconciled_symbols(rows):
+    """Symbols that already have a 'Reconciliation' row with a placed GTT or
+    pending sell — used to make re-running this script after fixing errors
+    idempotent, instead of duplicating the ones that already succeeded."""
+    done = set()
+    for row in rows[1:]:
+        if len(row) <= max(COL_CATEGORY, COL_SYMBOL, COL_GTT_STATUS):
+            continue
+        if row[COL_CATEGORY].strip() == 'Reconciliation':
+            done.add(row[COL_SYMBOL].strip().upper())
+    return done
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--live', action='store_true', help='Actually place GTTs. Default is dry run.')
@@ -177,6 +190,22 @@ def main():
     orders = load_orders(args.orders_csv, args.symbol, args.include_incomplete)
     if not orders:
         log('Nothing to place.')
+        return
+
+    ws = get_worksheet()
+    existing_rows = get_sheet_rows()
+    already_done = get_already_reconciled_symbols(existing_rows)
+
+    remaining = []
+    for o in orders:
+        if o['symbol'] in already_done:
+            log(f"SKIP {o['symbol']}: already has a Reconciliation row from a prior run")
+            continue
+        remaining.append(o)
+    orders = remaining
+
+    if not orders:
+        log('Nothing left to place — all matching symbols already reconciled.')
         return
 
     print(f"\n{'LIVE' if args.live else 'DRY RUN'} — {len(orders)} symbol(s) queued:")
@@ -194,7 +223,6 @@ def main():
 
     enctoken = get_enctoken()
     log("Kite enctoken obtained OK.")
-    ws = get_worksheet()
     today_str = datetime.now(IST).strftime('%Y-%m-%d')
 
     placed, failed, sold_past_target = 0, 0, 0

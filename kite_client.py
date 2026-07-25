@@ -12,6 +12,7 @@ import json
 import re
 import csv
 import io
+import math
 import difflib
 import pyotp
 import requests
@@ -72,6 +73,7 @@ SYMBOL_MAP = {
 }
 
 _instrument_cache = None  # normalized_name -> symbol, EQUITY ONLY
+_tick_size_cache = None   # SYMBOL (upper) -> tick_size, EQUITY ONLY
 
 
 def _normalize_name(name):
@@ -89,11 +91,16 @@ def _load_instrument_cache():
     Indexed by BOTH normalized company name (e.g. "cdsl" from "Central
     Depository Services...") AND the raw ticker symbol itself (e.g. "cdsl"
     from tradingsymbol "CDSL") — so a tip that names the stock either way
-    resolves via EXACT match instead of falling through to fuzzy matching."""
-    global _instrument_cache
+    resolves via EXACT match instead of falling through to fuzzy matching.
+    Also populates _tick_size_cache from the same download, since Kite
+    requires GTT trigger prices to be an exact multiple of each instrument's
+    own tick size (varies per stock — 0.05/0.10/1.00/5.00 seen in practice,
+    not a flat NSE-wide constant)."""
+    global _instrument_cache, _tick_size_cache
     if _instrument_cache is not None:
         return _instrument_cache
     _instrument_cache = {}
+    _tick_size_cache = {}
     try:
         r = requests.get('https://api.kite.trade/instruments/NSE', timeout=15)
         reader = csv.DictReader(io.StringIO(r.text))
@@ -106,10 +113,45 @@ def _load_instrument_cache():
                 continue
             _instrument_cache[_normalize_name(name)] = sym
             _instrument_cache.setdefault(sym.lower(), sym)  # don't clobber a name-based match with the same key
-        log(f"  Loaded {len(_instrument_cache)} equity instruments (indexed by name + symbol)")
+            try:
+                _tick_size_cache[sym.upper()] = float(row.get('tick_size') or 0.05)
+            except (ValueError, TypeError):
+                _tick_size_cache[sym.upper()] = 0.05
+        log(f"  Loaded {len(_instrument_cache)} equity instruments (indexed by name + symbol, "
+            f"tick sizes cached for {len(_tick_size_cache)})")
     except Exception as e:
         log(f"  Instrument list error: {e}")
     return _instrument_cache
+
+
+def get_tick_size(symbol):
+    """Returns the instrument's real tick size, falling back to NSE's common
+    Rs 0.05 default only if the symbol isn't found (rather than guessing
+    silently — this is logged so a fallback is visible, not invisible)."""
+    _load_instrument_cache()
+    tick = _tick_size_cache.get(symbol.strip().upper())
+    if tick is None:
+        log(f"  No tick size found for {symbol} — defaulting to Rs 0.05 (verify manually if this GTT fails)")
+        return 0.05
+    return tick
+
+
+def _round_to_tick(price, tick_size, mode='nearest'):
+    """Round price to a valid multiple of tick_size. mode='floor' rounds
+    down (used for the trigger, so it never accidentally lands AT or ABOVE
+    the target), mode='ceil' rounds up (used for the actual limit sell
+    price, so it's never below the tick-floored trigger), 'nearest' for
+    general use."""
+    if not tick_size or tick_size <= 0:
+        tick_size = 0.05
+    n = price / tick_size
+    if mode == 'floor':
+        n = math.floor(n + 1e-9)   # epsilon guards against float imprecision
+    elif mode == 'ceil':
+        n = math.ceil(n - 1e-9)
+    else:
+        n = round(n)
+    return round(n * tick_size, 2)
 
 
 def resolve_kite_symbol(stock_name, enctoken=None):
@@ -231,30 +273,37 @@ def kite_buy(tip, enctoken):
 
 def place_gtt(symbol, qty, target_price, last_price, enctoken):
     """Place a single-trigger GTT sell order.
-    trigger_price = Rs 0.10 below target (fires just before the price reaches target)
-    limit sell price = target_price (the actual sell price)
+    trigger_price = Rs 0.10 below target, ROUNDED DOWN to the instrument's
+    own tick size (0.05/0.10/1.00/5.00 etc — varies per stock, NOT a flat
+    NSE-wide constant). Kite requires the trigger to be an EXACT multiple
+    of that tick size — this was previously missing entirely, which is
+    exactly what caused "Trigger price should be a multiple of tick size
+    X" errors across roughly half of a batch of reconciliation GTTs.
+    limit sell price = target_price, rounded UP to the same tick size (so
+    it's never below the tick-floored trigger).
 
-    Kite requires last_price to differ from trigger_price by MORE THAN 0.25%
-    (and, for a sell GTT, last_price must be below trigger_price). We use a
-    0.5% margin — safely above Kite's 0.25% floor — rather than a flat rupee
-    amount, since a flat Rs 0.10 gap is well under 0.25% for almost any stock
-    priced above ~Rs 40, which is exactly what caused "Trigger price was too
-    close to the last price" errors once GTT_OFFSET became Rs 0.10 instead of
-    the old 3%-of-target gap.
+    Kite ALSO requires last_price to differ from trigger_price by MORE
+    THAN 0.25% (and, for a sell GTT, last_price must be below trigger_price).
+    We use a 0.5% margin — safely above that 0.25% floor — rather than a
+    flat rupee amount, since a flat Rs 0.10 gap is well under 0.25% for
+    almost any stock priced above ~Rs 40.
     """
+    tick_size = get_tick_size(symbol)
     GTT_OFFSET = 0.10
-    trigger_price = round(target_price - GTT_OFFSET, 2)
+    trigger_price = _round_to_tick(target_price - GTT_OFFSET, tick_size, mode='floor')
+    limit_price = _round_to_tick(target_price, tick_size, mode='ceil')
+
     min_gap = round(trigger_price * 0.005, 2)  # 0.5% margin, above Kite's 0.25% minimum
     if not last_price or (trigger_price - last_price) < min_gap:
         original = last_price
         last_price = round(trigger_price - min_gap, 2)
         log(f"  Adjusted last_price from {original} to {last_price} "
             f"(needed >0.25% gap from trigger {trigger_price}, using 0.5% margin)")
-    log(f"  GTT: trigger={trigger_price} limit={target_price} last_price={last_price}")
+    log(f"  GTT: tick_size={tick_size} trigger={trigger_price} limit={limit_price} last_price={last_price}")
     orders = json.dumps([{
         'exchange': EXCHANGE, 'tradingsymbol': symbol,
         'transaction_type': 'SELL', 'quantity': qty,
-        'order_type': 'LIMIT', 'product': 'CNC', 'price': target_price
+        'order_type': 'LIMIT', 'product': 'CNC', 'price': limit_price
     }])
     condition = json.dumps({
         'exchange': EXCHANGE, 'tradingsymbol': symbol,
