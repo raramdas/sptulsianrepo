@@ -36,7 +36,7 @@ from sheet_gtt_updater import (
     COL_BUY_OID, COL_GTT_ID, COL_GTT_STATUS, COL_MY_BUY_QTY, COL_NOTES,
 )
 
-DRY_RUN        = True   # Set to False for live — recommend running True first and reading the log
+DRY_RUN        = False   # Set to False for live — recommend running True first and reading the log
 LOOKBACK_DAYS  = 3
 FAILURE_MARKER = 'gtt failed'   # matches set_error()'s message for a place_gtt() exception, case-insensitive
 
