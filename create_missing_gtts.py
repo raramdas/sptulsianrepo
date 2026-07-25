@@ -1,217 +1,178 @@
 #!/usr/bin/env python3
 """
-create_missing_gtts.py — one-off reconciliation script: places GTTs for
-symbols where holdings/trades show a completed buy with no GTT yet placed.
+create_missing_gtts.py — one-off reconciliation script, v3.
 
-REBUILT to work with THIS codebase's actual Kite auth (kite_client.py's
-enctoken-based requests, not the kiteconnect SDK the original version used
-— that version referenced a config.get_kite_client() that doesn't exist
-here) and to fix a real correctness gap in the original's row-matching.
+Works against a "Reconciliation_Report" CSV with columns:
+  Symbol, Qty_Held, GTT_Qty_Placed, Uncovered_Qty, n_lots,
+  Blended_Avg_Buy_Price, Suggested_Blended_Target, Implied_Gain_Pct,
+  Trade_History_Complete
 
-WHY THE ORIGINAL VERSION WAS UNSAFE
-------------------------------------
-gtt_orders_to_place.csv's quantities are AGGREGATE TOTALS per symbol (e.g.
-IDEA: 16065 shares) — but your sheet routinely has MULTIPLE open rows for
-the same symbol from separate buys (confirmed in your own gtt.log: three
-separate "Vodafone Idea" rows, three "Zee Ent" rows, each with their own
-GTT). The original script grabbed the FIRST matching open row and attached
-the FULL aggregate quantity to it — which could double-count against GTTs
-that already exist on the OTHER rows for that same symbol, or attempt to
-sell more shares than that specific row's own position represents.
+Unlike the earlier version, this recon ALREADY accounts for existing GTTs
+(GTT_Qty_Placed) and gives us the exact residual needing a new GTT
+(Uncovered_Qty) — so there's no more guessing which sheet row(s) a quantity
+belongs to. We proved last run that most of these symbols (n_lots often in
+the double digits) have little or no representation in the Master Database
+sheet at all — most of this trading history lives only in Kite, not the
+sheet.
 
-HOW THIS VERSION HANDLES IT
-----------------------------
-For each CSV symbol: find every open sheet row for that symbol that doesn't
-already have a PLACED/RETRY GTT, and sum their My Buy Qty. Only proceed if
-that sum EXACTLY matches the CSV's quantity — then place one correctly
-sized GTT PER ROW (using that row's own qty), not one oversized GTT dumped
-on a single row. If the sum doesn't match, the symbol is skipped and
-flagged for manual reconciliation rather than guessed at.
-
-This also automatically protects the known CDSL/ICDSLTD mixup: no sheet
-row currently has Symbol='CDSL' exactly (it's sitting under the wrong
-symbol ICDSLTD pending your manual fix), so CDSL's row-sum will be 0 versus
-the CSV's 72 — a mismatch, and it gets skipped and flagged, not guessed at.
-
-TARGET / TRIGGER CONVENTION
-----------------------------
-The CSV's "trigger_price" column is treated as the TARGET (limit sell
-price) — consistent with the rest of this codebase, where the real Kite
-trigger is always target - Rs 0.10 (kite_client.py's place_gtt, GTT_OFFSET).
-This reuses that same, already-tested function, including its fix for
-Kite's "trigger too close to last price" 0.25%-minimum-gap rule.
-
-For last_price, this tries a live LTP first (get_market_price), falling
-back to the CSV's ref_buy_price only if a live quote can't be fetched —
-using a live price is safer than a potentially-stale historical buy price
-for satisfying Kite's own last_price validation.
+WHAT THIS DOES
+--------------
+For each symbol with Uncovered_Qty > 0:
+  1. Places ONE GTT for Uncovered_Qty @ Suggested_Blended_Target (via
+     kite_client.place_gtt — same tested function used everywhere else in
+     this codebase, trigger = target - Rs 0.10, with the 0.25%-gap fix).
+  2. APPENDS ONE NEW row to the sheet recording this consolidated position
+     — deliberately does NOT try to match/update any pre-existing rows for
+     that symbol, to avoid the ambiguity that broke the previous approach.
+     This is what lets main_gtt.py's regular Phase 2 monitoring (and its
+     recreate-on-cancel logic) pick this GTT up going forward.
 
 SAFETY
 ------
-- Defaults to DRY RUN. Nothing reaches the broker without --live, and
-  --live still requires typed confirmation before the first order goes out.
-- Skips (and logs) any symbol whose sheet-row quantity sum doesn't exactly
-  match the CSV quantity, rather than guessing which rows are covered.
-- Skips rows flagged trade_history_complete=False unless --include-incomplete.
-- Never touches a row that already has GTT_STATUS in {PLACED, RETRY}.
+- Defaults to DRY RUN. --live requires typed confirmation first.
+- Skips Uncovered_Qty <= 0 (already fully covered).
+- Skips Trade_History_Complete=FALSE rows unless --include-incomplete.
+- Logs GTT_Qty_Placed / n_lots for every symbol for visibility, but does
+  NOT attempt to verify or touch whatever GTTs already exist — trusts the
+  recon report's accounting of that, per your confirmation recon is done.
 
 USAGE
 -----
-    python3 create_missing_gtts.py                     # dry run, all rows
-    python3 create_missing_gtts.py --symbol APOLLO      # dry run, one symbol
-    python3 create_missing_gtts.py --live               # place for real
-    python3 create_missing_gtts.py --live --symbol IDEA # one symbol, live
+    python3 create_missing_gtts.py                       # dry run, all rows
+    python3 create_missing_gtts.py --symbol IDEA          # dry run, one symbol
+    python3 create_missing_gtts.py --live                 # place for real
+    python3 create_missing_gtts.py --live --symbol IDEA   # one symbol, live
 """
 import argparse
 import csv
 import time
+from datetime import datetime
 
-from config import log
+from config import log, IST
 from kite_client import get_enctoken, place_gtt, get_market_price
-from sheet_gtt_updater import (
-    get_worksheet,
-    get_sheet_rows,
-    set_gtt_placed,
-    set_gtt_dry_run,
-    set_error,
-    COL_STOCK,
-    COL_SYMBOL,
-    COL_STATUS,
-    COL_GTT_STATUS,
-    COL_MY_BUY_QTY,
-)
+from budget_manager import get_stock_cap_type, close_oracle_connection
+from sheet_gtt_updater import get_worksheet
 
-ORDERS_CSV = 'gtt_orders_to_place.csv'
-ALREADY_HANDLED = {'PLACED', 'RETRY'}
+ORDERS_CSV = 'reconciliation_report.csv'
 
 
 def load_orders(csv_path, only_symbol=None, include_incomplete=False):
     orders = []
     with open(csv_path, newline='') as f:
         for row in csv.DictReader(f):
-            if only_symbol and row['symbol'] != only_symbol:
+            symbol = row['Symbol'].strip().upper()
+            if only_symbol and symbol != only_symbol.strip().upper():
                 continue
-            complete = row['trade_history_complete'].strip().lower() == 'true'
+            complete = row['Trade_History_Complete'].strip().upper() == 'TRUE'
             if not complete and not include_incomplete:
-                log(f"SKIP {row['symbol']}: trade_history_complete=False "
+                log(f"SKIP {symbol}: Trade_History_Complete=FALSE "
                     f"(pass --include-incomplete to override)")
                 continue
+            uncovered = int(float(row['Uncovered_Qty']))
+            if uncovered <= 0:
+                log(f"SKIP {symbol}: Uncovered_Qty={uncovered} — already fully covered")
+                continue
             orders.append({
-                'symbol': row['symbol'].strip().upper(),
-                'quantity': int(float(row['quantity'])),
-                'target_price': round(float(row['trigger_price']), 2),  # treated as TARGET, see header
-                'ref_buy_price': round(float(row['ref_buy_price']), 2),
+                'symbol': symbol,
+                'qty_held': int(float(row['Qty_Held'])),
+                'gtt_qty_placed': int(float(row['GTT_Qty_Placed'])),
+                'uncovered_qty': uncovered,
+                'n_lots': int(float(row['n_lots'])),
+                'blended_avg_buy_price': round(float(row['Blended_Avg_Buy_Price']), 2),
+                'target_price': round(float(row['Suggested_Blended_Target']), 2),
+                'implied_gain_pct': row['Implied_Gain_Pct'],
             })
     return orders
 
 
-def find_matching_rows(rows, symbol):
-    """Return 1-based row indices of ALL open rows for this symbol that
-    don't already have a GTT placed — NOT just the first one, since a
-    symbol can legitimately have several separate open positions."""
-    matches = []
-    for i, row in enumerate(rows[1:], start=2):
-        if len(row) <= max(COL_SYMBOL, COL_STATUS, COL_GTT_STATUS, COL_MY_BUY_QTY):
-            continue
-        if row[COL_SYMBOL].strip().upper() != symbol:
-            continue
-        if row[COL_STATUS].strip().lower() != 'open':
-            continue
-        if row[COL_GTT_STATUS].strip().upper() in ALREADY_HANDLED:
-            continue
-        matches.append(i)
-    return matches
+def append_reconciliation_row(ws, o, gtt_id, gtt_status, cap_type, today_str):
+    ws.append_row([
+        'Reconciliation',                # A: Category
+        o['symbol'],                     # B: Stock
+        o['symbol'],                     # C: Symbol
+        cap_type or '',                  # D: Type
+        today_str,                       # E: Buy Date
+        o['blended_avg_buy_price'],      # F: Recommended Price
+        o['target_price'],               # G: Target
+        '',                              # H: Timeframe
+        '',                              # I: Have Interest
+        'Open',                          # J: Status
+        '', '', '',                      # K,L,M: Target Met / Exit Date / Gain
+        today_str,                       # N: My Buy Date
+        'RECONCILED',                    # O: Order Type
+        'RECONCILED',                    # P: Buy Order ID
+        o['blended_avg_buy_price'],      # Q: Market Price at Buy
+        o['blended_avg_buy_price'],       # R: My Buy Price
+        o['uncovered_qty'],              # S: My Buy Qty
+        '', '', '', '',                  # T,U,V,W: Sell Date/Price/Qty/Gain-Loss
+        gtt_id,                          # X: GTT ID
+        gtt_status,                      # Y: GTT Status
+        f"Reconciliation: {o['n_lots']} lots held, "
+        f"{o['qty_held']} total qty, {o['gtt_qty_placed']} already GTT-covered, "
+        f"{o['uncovered_qty']} newly covered here (implied gain {o['implied_gain_pct']}%)",
+        '',                              # AA: Retry Count
+    ])
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--live', action='store_true',
-                     help='Actually place GTTs. Default is dry run.')
+    ap.add_argument('--live', action='store_true', help='Actually place GTTs. Default is dry run.')
     ap.add_argument('--symbol', help='Restrict to a single symbol.')
     ap.add_argument('--include-incomplete', action='store_true',
-                     help='Also process symbols flagged trade_history_complete=False.')
+                     help='Also process symbols flagged Trade_History_Complete=FALSE.')
     ap.add_argument('--orders-csv', default=ORDERS_CSV)
     args = ap.parse_args()
 
     orders = load_orders(args.orders_csv, args.symbol, args.include_incomplete)
     if not orders:
-        log('Nothing to place — no matching rows in orders CSV.')
+        log('Nothing to place.')
         return
 
-    print(f"\n{'LIVE' if args.live else 'DRY RUN'} — {len(orders)} symbol(s) queued for reconciliation:")
+    print(f"\n{'LIVE' if args.live else 'DRY RUN'} — {len(orders)} symbol(s) queued:")
     for o in orders:
-        print(f"  {o['symbol']:<12} total_qty={o['quantity']:<7} target={o['target_price']}")
+        print(f"  {o['symbol']:<12} uncovered={o['uncovered_qty']:<7} "
+              f"(held={o['qty_held']}, already_gtt={o['gtt_qty_placed']}, "
+              f"lots={o['n_lots']}) target={o['target_price']}")
 
-    enctoken = None
     if args.live:
         confirm = input(f"\nType 'CONFIRM' to place real GTTs for these {len(orders)} symbol(s): ")
         if confirm.strip() != 'CONFIRM':
             print('Aborted — no orders placed.')
             return
-        enctoken = get_enctoken()
-        log("Kite enctoken obtained OK.")
-    else:
-        # Still need a real enctoken to fetch live LTPs even in dry run,
-        # so the dry-run log shows realistic numbers.
-        enctoken = get_enctoken()
 
-    ws   = get_worksheet()
-    rows = get_sheet_rows()
+    enctoken = get_enctoken()
+    log("Kite enctoken obtained OK.")
+    ws = get_worksheet()
+    today_str = datetime.now(IST).strftime('%Y-%m-%d')
 
-    placed, skipped, failed, mismatched = 0, 0, 0, 0
+    placed, failed = 0, 0
 
     for o in orders:
         symbol = o['symbol']
-        row_indices = find_matching_rows(rows, symbol)
-        sheet_qty_sum = 0
-        for i in row_indices:
-            try:
-                sheet_qty_sum += int(float(rows[i - 1][COL_MY_BUY_QTY]))
-            except (ValueError, IndexError):
-                pass
+        ltp = get_market_price(symbol.title(), enctoken, kite_symbol=symbol) or o['blended_avg_buy_price']
+        cap_type = get_stock_cap_type(symbol)
 
-        log(f"{symbol}: CSV qty={o['quantity']} | sheet rows found={len(row_indices)} "
-            f"(sum={sheet_qty_sum})")
+        log(f"{symbol}: uncovered_qty={o['uncovered_qty']} target={o['target_price']} "
+            f"ltp={ltp} cap_type={cap_type or 'UNKNOWN'}")
 
-        if sheet_qty_sum != o['quantity']:
-            log(f"  ⚠ MISMATCH — sheet quantity sum ({sheet_qty_sum}) does not exactly match "
-                f"CSV quantity ({o['quantity']}). Skipping {symbol} entirely rather than "
-                f"guessing which rows this covers. Reconcile manually.")
-            mismatched += 1
+        if not args.live:
+            log(f"  [DRY RUN] Would place GTT SELL {o['uncovered_qty']} x {symbol} "
+                f"@ target {o['target_price']}, then append a new tracked sheet row")
+            placed += 1
             continue
 
-        if not row_indices:
-            log(f"  No open, un-GTT'd rows found for {symbol} — skipping")
-            skipped += 1
-            continue
+        try:
+            gtt_id = place_gtt(symbol, o['uncovered_qty'], o['target_price'], ltp, enctoken)
+            append_reconciliation_row(ws, o, gtt_id, 'PLACED', cap_type, today_str)
+            log(f"  PLACED: {symbol} gtt_id={gtt_id} — new sheet row appended")
+            placed += 1
+            time.sleep(0.5)
+        except Exception as e:
+            log(f"  ERROR {symbol}: {e}")
+            failed += 1
 
-        ltp = get_market_price(symbol.title(), enctoken, kite_symbol=symbol) or o['ref_buy_price']
-
-        for i in row_indices:
-            stock_name = rows[i - 1][COL_STOCK] if len(rows[i - 1]) > COL_STOCK else symbol
-            qty = int(float(rows[i - 1][COL_MY_BUY_QTY]))
-
-            if not args.live:
-                log(f"  [DRY RUN] Row {i} ({stock_name}): would place GTT SELL "
-                    f"{qty} x {symbol} @ target {o['target_price']} (ltp={ltp})")
-                set_gtt_dry_run(i)
-                placed += 1
-                continue
-
-            try:
-                gtt_id = place_gtt(symbol, qty, o['target_price'], ltp, enctoken)
-                set_gtt_placed(i, gtt_id)
-                log(f"  PLACED row {i} ({stock_name}): {qty} x {symbol} @ target "
-                    f"{o['target_price']} -> gtt_id={gtt_id}")
-                placed += 1
-                time.sleep(0.5)  # be polite to the API
-            except Exception as e:
-                set_error(i, f'GTT placement failed (reconciliation): {e}')
-                log(f"  ERROR row {i} ({stock_name}): {e}")
-                failed += 1
-
-    print(f"\nDone. placed={placed} skipped={skipped} failed={failed} mismatched={mismatched} "
-          f"mode={'LIVE' if args.live else 'DRY RUN'}")
+    close_oracle_connection()
+    print(f"\nDone. placed={placed} failed={failed} mode={'LIVE' if args.live else 'DRY RUN'}")
 
 
 if __name__ == '__main__':
