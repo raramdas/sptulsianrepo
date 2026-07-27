@@ -26,13 +26,14 @@ KNOWN_CATEGORIES = sorted([
 ], key=len, reverse=True)
 
 # If an IMAP search for today's date range comes back with zero matches, we
-# retry a few times with a short delay rather than immediately concluding
-# "no tips today". This guards against a real, observed Gmail quirk: a
-# message can have a valid INTERNALDATE and be sitting in the mailbox, yet
-# not be immediately SEARCHable via IMAP for a short window after delivery.
-# Confirmed case: emails delivered 08:30-09:10 IST were invisible to this
-# exact search at 09:20 IST, but the identical query found them fine days
-# later — a transient indexing lag, not a real "no email" day.
+# retry a few times with a short delay AND a fresh connection each attempt,
+# rather than immediately concluding "no tips today". Confirmed root cause:
+# reusing the SAME connection across retries (just sleeping + re-searching)
+# returned 0 for a full 6 minutes straight on 27-Jul, while a brand-new
+# connection found the same emails instantly at any point in that window —
+# Gmail's IMAP can return a session-cached view of the mailbox on a
+# persistent connection, so waiting alone doesn't help; a fresh
+# login+SELECT per attempt is what actually forces an up-to-date view.
 SEARCH_RETRY_ATTEMPTS = 3
 SEARCH_RETRY_DELAY_SECONDS = 90
 
@@ -65,24 +66,41 @@ def get_email_body_text(msg):
     return ''
 
 
-def _search_with_retry(mail, search_str):
-    """Runs the given IMAP search, retrying with a delay if it comes back
-    empty — guards against the indexing-lag issue described above. Returns
-    the list of matched message IDs (possibly empty after all retries)."""
+def _connect_and_select(mailbox):
+    """Fresh login + SELECT — used for every search attempt (not reused
+    across retries) to guarantee an up-to-date view of the mailbox."""
+    mail = imaplib.IMAP4_SSL('imap.gmail.com')
+    mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+    mail.select(mailbox)
+    return mail
+
+
+def _search_with_retry(mailbox, search_str):
+    """Runs the given IMAP search, retrying with a delay AND a fresh
+    connection each attempt if it comes back empty. Returns (found_ids, mail)
+    — the caller uses the returned (still-open) connection to fetch the
+    matched messages, avoiding yet another reconnect right after."""
+    mail = None
     for attempt in range(1, SEARCH_RETRY_ATTEMPTS + 1):
+        if mail:
+            try:
+                mail.logout()
+            except Exception:
+                pass
+        mail = _connect_and_select(mailbox)
         _, ids = mail.search(None, search_str)
         found = ids[0].split() if ids[0] else []
         if found:
             if attempt > 1:
                 log(f"  Search succeeded on attempt {attempt}/{SEARCH_RETRY_ATTEMPTS} "
-                    f"(earlier attempt(s) returned 0 — likely IMAP indexing lag)")
-            return found
+                    f"with a fresh connection (earlier attempt(s) returned 0 on a "
+                    f"stale connection — this is the fix, not just waiting longer)")
+            return found, mail
         if attempt < SEARCH_RETRY_ATTEMPTS:
             log(f"  Search attempt {attempt}/{SEARCH_RETRY_ATTEMPTS} found 0 — "
-                f"waiting {SEARCH_RETRY_DELAY_SECONDS}s before retrying "
-                f"(Gmail's IMAP index can briefly lag behind actual delivery)")
+                f"waiting {SEARCH_RETRY_DELAY_SECONDS}s before retrying with a fresh connection")
             time.sleep(SEARCH_RETRY_DELAY_SECONDS)
-    return []
+    return [], mail
 
 
 def parse_todays_emails():
@@ -91,21 +109,19 @@ def parse_todays_emails():
     today = TEST_DATE if TEST_DATE else datetime.now(IST).strftime('%d-%b-%Y')
 
     log(f"Connecting to Gmail, searching for SPTulsian emails on {today}...")
-    mail = imaplib.IMAP4_SSL('imap.gmail.com')
-    mail.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-    mail.select('inbox')
 
     parsed_date = datetime.strptime(today, '%d-%b-%Y')
     next_day  = (parsed_date + timedelta(days=1)).strftime('%d-%b-%Y')
     imap_date = parsed_date.strftime('%d-%b-%Y')
     search_str = f'(FROM "sptulsian.com" SINCE {imap_date} BEFORE {next_day})'
     log(f"IMAP search: {search_str}")
-    found = _search_with_retry(mail, search_str)
+
+    found, mail = _search_with_retry('inbox', search_str)
     log(f"Emails matched: {len(found)}")
 
     if not found:
-        mail.select('"[Gmail]/All Mail"')
-        found = _search_with_retry(mail, search_str)
+        mail.logout()
+        found, mail = _search_with_retry('"[Gmail]/All Mail"', search_str)
         log(f"All Mail fallback matched: {len(found)}")
 
     for num in found:
