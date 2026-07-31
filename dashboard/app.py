@@ -28,6 +28,7 @@ load_dotenv('/home/ubuntu/.env')
 
 import db
 import theme
+import kite_data
 
 st.set_page_config(page_title="Stock Bot — Capital Ledger", page_icon="\U0001F4CA", layout="wide")
 theme.inject()
@@ -100,6 +101,58 @@ def fmt(n):
 
 def page_overview():
     st.title("Portfolio Overview")
+
+    st.markdown("### Live Broker Snapshot (Kite)")
+    st.caption("Fetched directly from your Zerodha account — holdings, GTTs, and today's order "
+               "book. This is the actual broker state; the budget tracking below is Capital "
+               "Ledger's own bookkeeping in Oracle and can drift from it.")
+
+    if st.button("Refresh Kite data"):
+        kite_data.get_holdings.clear()
+        kite_data.get_gtts.clear()
+        kite_data.get_orders.clear()
+        st.rerun()
+
+    try:
+        hs = kite_data.holdings_summary()
+        gs = kite_data.gtt_summary()
+        os_ = kite_data.orders_today_summary()
+
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.markdown(theme.kpi_card("Holdings (live)", hs['count'], tone="accent"), unsafe_allow_html=True)
+        with k2:
+            st.markdown(theme.kpi_card("Invested (live)", fmt(hs['invested'])), unsafe_allow_html=True)
+        with k3:
+            st.markdown(theme.kpi_card("Current Value (live)", fmt(hs['current_value'])), unsafe_allow_html=True)
+        with k4:
+            tone = "positive" if hs['pnl'] >= 0 else "negative"
+            st.markdown(theme.kpi_card("Unrealized P&L (live)", fmt(hs['pnl']), tone=tone), unsafe_allow_html=True)
+
+        k5, k6, k7 = st.columns(3)
+        with k5:
+            st.markdown(theme.kpi_card("Active GTTs", gs['active'], tone="accent"), unsafe_allow_html=True)
+        with k6:
+            st.markdown(theme.kpi_card("Total GTTs (any status)", gs['total']), unsafe_allow_html=True)
+        with k7:
+            order_line = " · ".join(f"{k}: {v}" for k, v in os_['by_status'].items()) or "none"
+            st.markdown(theme.kpi_card("Today's Orders", os_['total']), unsafe_allow_html=True)
+            st.caption(order_line)
+
+        with st.expander(f"Holdings detail ({hs['count']})"):
+            hdf = pd.DataFrame(kite_data.get_holdings())
+            if not hdf.empty:
+                cols = [c for c in ['tradingsymbol', 'quantity', 'average_price', 'last_price', 'pnl']
+                        if c in hdf.columns]
+                st.markdown(theme.render_table(hdf[cols], money_cols=['average_price', 'last_price', 'pnl'],
+                                               gain_col='pnl'), unsafe_allow_html=True)
+    except Exception as e:
+        st.warning(f"Couldn't reach Kite for live data — showing Oracle-only figures below. ({e})")
+
+    st.divider()
+
+    st.markdown("### Budget Tracking (Oracle)")
+    st.caption("Capital Ledger's own category/budget bookkeeping — not Kite's live account state.")
     s = db.portfolio_summary()
 
     col_gauge, col_kpis = st.columns([1, 2])
@@ -111,8 +164,8 @@ def page_overview():
             st.markdown(theme.kpi_card("Total Budget", fmt(s['total_budget']), tone="accent"), unsafe_allow_html=True)
             st.markdown(theme.kpi_card("Available", fmt(s['available']), tone="positive"), unsafe_allow_html=True)
         with c2:
-            st.markdown(theme.kpi_card("Invested (Open)", fmt(s['invested'])), unsafe_allow_html=True)
-            st.markdown(theme.kpi_card("Open Positions", s['open_positions']), unsafe_allow_html=True)
+            st.markdown(theme.kpi_card("Invested (Open, Oracle)", fmt(s['invested'])), unsafe_allow_html=True)
+            st.markdown(theme.kpi_card("Open Positions (Oracle)", s['open_positions']), unsafe_allow_html=True)
 
     st.markdown("### Category Allocation")
     cat = db.category_status()
