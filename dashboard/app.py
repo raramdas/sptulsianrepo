@@ -550,7 +550,9 @@ def page_orders():
                 cols = [c for c in ['order_timestamp', 'tradingsymbol', 'transaction_type', 'order_type',
                                     'quantity', 'filled_quantity', 'price', 'average_price', 'status']
                         if c in fdf.columns]
-                display = fdf[cols].rename(columns={'tradingsymbol': 'symbol'})
+                display = fdf[cols].rename(columns={'tradingsymbol': 'symbol'}).copy()
+                if 'order_timestamp' in display.columns:
+                    display['order_timestamp'] = display['order_timestamp'].astype(str).str.split(' ').str[0]
                 st.markdown(theme.render_table(display, money_cols=['price', 'average_price'],
                                                status_col='status'), unsafe_allow_html=True)
         else:
@@ -564,6 +566,10 @@ def page_orders():
                 status = st.selectbox("Status", status_options, key='gtt_status_filter')
                 fdf = gdf if status == 'All' else gdf[gdf['status'] == status]
                 st.caption(f"{len(fdf)} GTT trigger(s)")
+                fdf = fdf.copy()
+                for date_col in ('created_at', 'expires_at'):
+                    if date_col in fdf.columns:
+                        fdf[date_col] = fdf[date_col].astype(str).str.split(' ').str[0]
                 st.markdown(theme.render_table(fdf, money_cols=['trigger_price', 'last_price', 'sell_price'],
                                                status_col='status'), unsafe_allow_html=True)
     except Exception as e:

@@ -381,6 +381,11 @@ def render_table(df, money_cols=None, status_col=None, gain_col=None):
                 status_val = str(val).lower()
                 css_class += f" status-{status_val}"
             blank = val is None or val == '' or pd.isna(val)
+            if not blank and hasattr(val, 'strftime'):
+                # Timestamp/datetime/date — every date column in this app is
+                # a calendar date (buy/sell date), never a meaningful
+                # intraday time, so always show just YYYY-MM-DD.
+                val = val.strftime('%Y-%m-%d')
             if gain_col and c == gain_col and not blank:
                 try:
                     css_class += " gain-pos" if float(val) >= 0 else " gain-neg"
