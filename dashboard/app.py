@@ -13,6 +13,7 @@ Pages:
   - Performance          realized P&L trend, win rate, category breakdown
   - Set Targets          set target price / timeframe / have-interest per trade
   - Trades Explorer      filterable, searchable, CSV export
+  - Recommendations      every tip the bot has seen, bought or not
   - Orders               live Kite order book + GTT triggers, filterable
   - Classification       AMFI cap-type lookup
   - Settings & Edits     total budget, category %, manually close a trade
@@ -370,6 +371,30 @@ def page_trades():
         st.download_button("Download results (CSV)", csv, "trades_export.csv", "text/csv")
 
 
+def page_recommendations():
+    st.title("Stock Recommendations")
+    st.caption("Every tip the bot has seen from SPTulsian emails — bought or not. Target price "
+               "is blank for all rows right now since SPTulsian's target/timeframe scraping is "
+               "disabled pending IP whitelisting (spt_scraper.py).")
+
+    df = db.all_recommendations()
+    if df.empty:
+        st.info("No recommendations yet.")
+        return
+
+    display = df.rename(columns={
+        'buy_date': 'Date', 'stock_name': 'Stock',
+        'recommended_price': 'Purchase Price', 'target_price': 'Target Price',
+        'status': 'Status',
+    })
+    st.caption(f"{len(display)} recommendation(s)")
+    st.markdown(
+        theme.render_table(display[['Date', 'Stock', 'Purchase Price', 'Target Price', 'Status']],
+                           money_cols=['Purchase Price', 'Target Price'], status_col='Status'),
+        unsafe_allow_html=True
+    )
+
+
 def page_classification():
     st.title("Stock Cap Classification")
     st.caption("Source: AMFI official market-cap categorization")
@@ -552,6 +577,7 @@ PAGES = [
     "Performance",
     "Set Targets",
     "Trades Explorer",
+    "Recommendations",
     "Orders",
     "Classification",
     "Settings & Edits",
@@ -593,6 +619,8 @@ def main():
             page_set_targets()
         elif page == "Trades Explorer":
             page_trades()
+        elif page == "Recommendations":
+            page_recommendations()
         elif page == "Orders":
             page_orders()
         elif page == "Classification":

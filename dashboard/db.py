@@ -141,6 +141,20 @@ def trades(status=None, category=None, symbol=None, date_from=None, date_to=None
     return _df(sql, params)
 
 
+def all_recommendations():
+    """Every tip the bot has ever processed — bought or not. No new table
+    needed: budget_manager.py's insert_trade_to_oracle() already writes a
+    trades row for every outcome (Open, Closed, SKIPPED, ERROR,
+    NEEDS_REVIEW), with recommended_price/target_price populated regardless
+    of whether a buy actually happened — this was already being captured,
+    just never surfaced as its own view."""
+    return _df("""
+        SELECT trade_id, buy_date, stock_name, recommended_price, target_price, status
+        FROM trades
+        ORDER BY buy_date DESC, trade_id DESC
+    """)
+
+
 def cap_classification_summary():
     return _df("""
         SELECT cap_type, COUNT(*) AS count, source_period
