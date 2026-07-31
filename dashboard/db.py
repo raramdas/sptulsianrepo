@@ -15,7 +15,10 @@ import os
 import datetime
 import oracledb
 import pandas as pd
+import pytz
 from dotenv import load_dotenv
+
+IST = pytz.timezone('Asia/Kolkata')
 
 load_dotenv('/home/ubuntu/.env')
 
@@ -332,7 +335,10 @@ def save_kite_snapshot(holdings, gtts, orders):
     conn = get_connection()
     try:
         cur = conn.cursor()
-        now = datetime.datetime.now()
+        # Naive-but-IST wall-clock time (VM's system clock is UTC — matches
+        # the convention used everywhere else in the bot scripts:
+        # datetime.now(IST) then treated as naive for storage/display).
+        now = datetime.datetime.now(IST).replace(tzinfo=None)
 
         cur.execute("DELETE FROM kite_holdings_snapshot")
         if holdings:
