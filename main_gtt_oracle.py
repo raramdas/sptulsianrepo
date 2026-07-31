@@ -97,8 +97,11 @@ def run():
             gtt_skipped += 1
 
         elif kite_status in ('REJECTED', 'CANCELLED'):
-            log(f"  Order {kite_status} — marking ERROR")
-            mark_trade_error_oracle(trade_id, f'Buy order {kite_status}')
+            if GTT_DRY_RUN:
+                log(f"  [DRY RUN] Order {kite_status} — would mark ERROR")
+            else:
+                log(f"  Order {kite_status} — marking ERROR")
+                mark_trade_error_oracle(trade_id, f'Buy order {kite_status}')
             gtt_skipped += 1
 
         else:
