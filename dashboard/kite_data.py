@@ -182,26 +182,32 @@ def tag_holdings_with_category(open_trades_df):
     return pd.DataFrame(rows, columns=cols)
 
 
-def live_category_breakdown(open_trades_df):
-    """Per-category live invested/current_value/pnl, plus the unmapped
-    holdings (Kite holdings with no matching open Oracle trade) — the
-    actionable reconciliation list for the Oracle/Kite gap.
+def unrealized_pnl_for_oracle_trades(open_trades_df):
+    """Unrealized P&L for Oracle's own recorded Open trades only — priced
+    against live Kite last_price (matched by symbol). Deliberately NOT the
+    full holdings-reconciliation view (that's what tag_holdings_with_category
+    is for) — this stays scoped to exactly what Oracle's Budget Tracking
+    already claims is open, just marked to live market price instead of
+    buy price, so it answers 'how is Oracle's own bookkeeping doing right
+    now' rather than 'what does the whole broker account look like'.
 
-    Returns (category_df, unmapped_df).
+    Returns (total_pnl, unpriced_count) — unpriced_count is how many open
+    trades had no matching live quote (e.g. sold outside Oracle, delisted,
+    symbol renamed) and were excluded from the total.
     """
-    tagged = tag_holdings_with_category(open_trades_df)
-    empty_cat = pd.DataFrame(columns=['category_name', 'invested', 'current_value', 'pnl'])
-    if tagged.empty:
-        return empty_cat, pd.DataFrame()
-
-    mapped = tagged[tagged['category_name'].notna()]
-    unmapped_df = tagged[tagged['category_name'].isna()].drop(columns=['category_name']).reset_index(drop=True)
-    if mapped.empty:
-        return empty_cat, unmapped_df
-    category_df = mapped.groupby('category_name').agg(
-        invested=('invested', 'sum'), current_value=('current_value', 'sum'), pnl=('pnl', 'sum')
-    ).reset_index().sort_values('invested', ascending=False)
-    return category_df, unmapped_df
+    if open_trades_df is None or open_trades_df.empty:
+        return 0.0, 0
+    price_map = {(h.get('tradingsymbol') or '').upper(): float(h.get('last_price') or 0)
+                 for h in get_holdings()}
+    total = 0.0
+    unpriced = 0
+    for _, r in open_trades_df.iterrows():
+        ltp = price_map.get((r['symbol'] or '').upper())
+        if ltp:
+            total += (ltp - float(r['my_buy_price'])) * float(r['my_buy_qty'])
+        else:
+            unpriced += 1
+    return total, unpriced
 
 
 def open_orders_count():

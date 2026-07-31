@@ -288,30 +288,6 @@ def category_bar(name, budget, invested, available):
     """
 
 
-def category_performance_card(name, invested, current_value, pnl, realized_pnl=None):
-    """Per-category live performance card — invested/current value plus
-    unrealized (and optionally realized) P&L, mirroring the portfolio-level
-    KPIs but scoped to one category. Unlike category_bar (budget vs spend),
-    P&L can go negative, so this isn't a progress bar."""
-    pnl_color = POSITIVE if pnl >= 0 else NEGATIVE
-    realized_html = ""
-    if realized_pnl is not None:
-        r_color = POSITIVE if realized_pnl >= 0 else NEGATIVE
-        realized_html = f'<span class="cat-figures">Realized: <b style="color:{r_color};">₹{realized_pnl:,.0f}</b></span>'
-    return f"""
-    <div class="cat-row">
-        <div class="cat-header">
-            <span class="cat-name">{name}</span>
-            <span class="cat-figures">Invested ₹{invested:,.0f} · Current ₹{current_value:,.0f}</span>
-        </div>
-        <div class="cat-header" style="margin-top:0.15rem;">
-            <span class="cat-figures">Unrealized: <b style="color:{pnl_color};">₹{pnl:,.0f}</b></span>
-            {realized_html}
-        </div>
-    </div>
-    """
-
-
 def pill(text, tone="muted"):
     return f'<span class="pill pill-{tone}">{text}</span>'
 

@@ -115,8 +115,6 @@ def page_overview():
         st.rerun()
 
     open_trades_df = db.trades(status='Open')
-    fy_perf = db.realized_pnl_fy()
-    realized_pnl = fy_perf['total_realized']
 
     def _drill(nav_page, **filters):
         st.session_state['nav_page'] = nav_page
@@ -137,19 +135,6 @@ def page_overview():
             st.markdown(theme.kpi_card("Invested (live)", fmt(hs['invested'])), unsafe_allow_html=True)
         with k3:
             st.markdown(theme.kpi_card("Current Value (live)", fmt(hs['current_value'])), unsafe_allow_html=True)
-
-        p1, p2, p3 = st.columns(3)
-        with p1:
-            tone = "positive" if realized_pnl >= 0 else "negative"
-            st.markdown(theme.kpi_card(f"Realized P&L ({fy_perf['fy_label']})", fmt(realized_pnl), tone=tone), unsafe_allow_html=True)
-        with p2:
-            tone = "positive" if hs['pnl'] >= 0 else "negative"
-            st.markdown(theme.kpi_card("Unrealized P&L (live)", fmt(hs['pnl']), tone=tone), unsafe_allow_html=True)
-        with p3:
-            total_pnl = realized_pnl + hs['pnl']
-            tone = "positive" if total_pnl >= 0 else "negative"
-            st.markdown(theme.kpi_card(f"Total P&L ({fy_perf['fy_label']} Realized + Live Unrealized)",
-                                       fmt(total_pnl), tone=tone), unsafe_allow_html=True)
 
         k5, k6, k7 = st.columns(3)
         with k5:
@@ -200,25 +185,6 @@ def page_overview():
                                "'Open' row in Oracle's trades table — the gap between Budget Tracking "
                                "below and your real broker state.")
                     _render_holdings(unmapped)
-
-        st.markdown("### Category Performance (Live)")
-        st.caption(f"Live Kite holdings attributed to each category via Oracle's category tagging, "
-                   f"plus that category's {fy_perf['fy_label']} realized P&L. Categories with no live "
-                   f"holdings mapped to them are omitted here (see Budget Tracking below for those).")
-        cat_live, _ = kite_data.live_category_breakdown(open_trades_df)
-        realized_by_cat = db.category_pnl_breakdown_fy()
-        if not cat_live.empty:
-            realized_map = dict(zip(realized_by_cat['category_name'], realized_by_cat['realized_pnl'])) \
-                if not realized_by_cat.empty else {}
-            for _, row in cat_live.iterrows():
-                st.markdown(
-                    theme.category_performance_card(
-                        row['category_name'], row['invested'], row['current_value'], row['pnl'],
-                        realized_pnl=realized_map.get(row['category_name'])
-                    ), unsafe_allow_html=True
-                )
-        else:
-            st.info("No live holdings could be matched to a category yet.")
     except Exception as e:
         st.warning(f"Couldn't reach Kite for live data — showing Oracle-only figures below. ({e})")
 
@@ -227,6 +193,8 @@ def page_overview():
     st.markdown("### Budget Tracking (Oracle)")
     st.caption("Capital Ledger's own category/budget bookkeeping — not Kite's live account state.")
     s = db.portfolio_summary()
+    fy_perf = db.realized_pnl_fy()
+    realized_pnl = fy_perf['total_realized']
 
     col_gauge, col_kpis = st.columns([1, 2])
     with col_gauge:
@@ -239,6 +207,29 @@ def page_overview():
         with c2:
             st.markdown(theme.kpi_card("Invested (Open, Oracle)", fmt(s['invested'])), unsafe_allow_html=True)
             st.markdown(theme.kpi_card("Open Positions (Oracle)", s['open_positions']), unsafe_allow_html=True)
+
+    p1, p2, p3 = st.columns(3)
+    with p1:
+        tone = "positive" if realized_pnl >= 0 else "negative"
+        st.markdown(theme.kpi_card(f"Realized P&L ({fy_perf['fy_label']})", fmt(realized_pnl), tone=tone), unsafe_allow_html=True)
+    try:
+        unrealized_pnl, unpriced_count = kite_data.unrealized_pnl_for_oracle_trades(open_trades_df)
+        with p2:
+            tone = "positive" if unrealized_pnl >= 0 else "negative"
+            st.markdown(theme.kpi_card("Unrealized P&L (Oracle open trades, live price)", fmt(unrealized_pnl), tone=tone), unsafe_allow_html=True)
+            if unpriced_count:
+                st.caption(f"{unpriced_count} open trade(s) couldn't be priced (no matching live quote)")
+        with p3:
+            total_pnl = realized_pnl + unrealized_pnl
+            tone = "positive" if total_pnl >= 0 else "negative"
+            st.markdown(theme.kpi_card(f"Total P&L ({fy_perf['fy_label']} Realized + Live Unrealized)",
+                                       fmt(total_pnl), tone=tone), unsafe_allow_html=True)
+    except Exception as e:
+        with p2:
+            st.markdown(theme.kpi_card("Unrealized P&L", "—"), unsafe_allow_html=True)
+            st.caption(f"Couldn't reach Kite for live pricing ({e})")
+        with p3:
+            st.markdown(theme.kpi_card("Total P&L", "—"), unsafe_allow_html=True)
 
     st.markdown("### Category Allocation")
     cat = db.category_status()
