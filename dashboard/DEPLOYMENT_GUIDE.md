@@ -132,6 +132,18 @@ sudo systemctl start stockbot-dashboard
 sudo systemctl status stockbot-dashboard
 ```
 
+> **Current live setup (as of Aug 2026):** on `140.245.226.35` the
+> `stockbot-dashboard` unit's actual `WorkingDirectory` is
+> `/home/ubuntu/stockbot/dashboard`, not `/home/ubuntu/stock_bot_v4/dashboard`
+> as shown above — an earlier deploy predates the `stock_bot_v4` rename/clone
+> and the unit was never repointed. `/home/ubuntu/stock_bot_v4` is a separate
+> checkout of this same repo and is what the buy/GTT cron jobs (`main.py`,
+> `main_gtt.py`) actually run from. Both checkouts are kept up to date with
+> `origin/main`, but when deploying dashboard changes, confirm which directory
+> the live unit points at first — run:
+> `sudo systemctl show -p WorkingDirectory stockbot-dashboard`
+> — rather than assuming it matches this guide.
+
 Note `--server.address 127.0.0.1` — Streamlit is bound to localhost, reachable
 only by Caddy, never directly from the internet.
 
