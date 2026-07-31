@@ -7,9 +7,9 @@ trades, cap_classification_summary, lookup_symbol, and the write operations)
 are unchanged from the version validated against test_dashboard_logic.py
 (20/20 passing against a SQLite mock) before being ported to Oracle syntax.
 
-Added for the expanded dashboard: realized_performance() and gtt_coverage(),
-both built strictly from columns that already exist on `trades` — no new
-tables or schema changes required.
+Added for the expanded dashboard: realized_performance(), built strictly
+from columns that already exist on `trades` — no new tables or schema
+changes required.
 """
 import os
 import datetime
@@ -260,45 +260,127 @@ def realized_pnl_fy():
     return {'total_realized': float(fy_df['my_gain_loss'].sum()), 'trade_count': len(fy_df), 'fy_label': label}
 
 
-def category_pnl_breakdown():
-    """Realized P&L grouped by category — for the performance page."""
+def performance_by_category():
+    """Realized P&L, trade count, win rate, and avg holding period — grouped
+    by category. Centerpiece of the Performance page, which is deliberately
+    category-level only (no per-stock detail there)."""
     df = realized_performance()
+    empty = pd.DataFrame(columns=['category_name', 'realized_pnl', 'trade_count', 'win_rate', 'avg_holding_days'])
     if df.empty:
-        return pd.DataFrame(columns=['category_name', 'realized_pnl', 'trade_count'])
+        return empty
     df = df.copy()
     df['my_gain_loss'] = pd.to_numeric(df['my_gain_loss'], errors='coerce').fillna(0)
+    df['buy_date'] = pd.to_datetime(df['buy_date'], errors='coerce')
+    df['my_sell_date'] = pd.to_datetime(df['my_sell_date'], errors='coerce')
+    df['holding_days'] = (df['my_sell_date'] - df['buy_date']).dt.days
+    df['is_win'] = df['my_gain_loss'] > 0
     out = df.groupby('category_name').agg(
         realized_pnl=('my_gain_loss', 'sum'),
         trade_count=('trade_id', 'count'),
+        win_rate=('is_win', lambda s: round(100 * s.sum() / len(s), 1) if len(s) else 0),
+        avg_holding_days=('holding_days', lambda s: round(s.mean(), 1) if s.notna().any() else 0),
     ).reset_index().sort_values('realized_pnl', ascending=False)
     return out
 
 
-# ── GTT coverage (new) ────────────────────────────────────────────
+# ── Kite snapshot (new) ───────────────────────────────────────────
+# The dashboard doesn't call Kite's live API on every page view — per
+# explicit preference to avoid drawing Zerodha's attention / rate limiting
+# from a customer-facing web app, kite_data.sync_now() is the ONLY live
+# Kite call, triggered manually by the 'Sync Kite Data' button on Overview.
+# It writes here; everything else reads the last-synced snapshot back.
 
-def gtt_coverage():
-    """Open trades that have a target price set — split into 'has GTT'
-    vs 'missing GTT', mirroring the manual reconciliation workflow
-    (Holdings vs Master DB vs GTT Orders) but driven off live trade data."""
-    return _df("""
-        SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
-               my_buy_qty, my_buy_price, invested_amount, target_price, gtt_id, gtt_status
-        FROM trades
-        WHERE status = 'Open' AND target_price IS NOT NULL
-        ORDER BY CASE WHEN gtt_id IS NULL THEN 0 ELSE 1 END, buy_date DESC
+def save_kite_snapshot(holdings, gtts, orders):
+    """Replace the Kite snapshot tables with a fresh sync. Full
+    delete+reinsert each time — this is a point-in-time snapshot, not a
+    history, so there's no reconciliation logic needed on write."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        now = datetime.datetime.now()
+
+        cur.execute("DELETE FROM kite_holdings_snapshot")
+        if holdings:
+            cur.executemany("""
+                INSERT INTO kite_holdings_snapshot
+                    (tradingsymbol, quantity, average_price, last_price, pnl, synced_at)
+                VALUES (:1, :2, :3, :4, :5, :6)
+            """, [
+                (h.get('tradingsymbol'), h.get('quantity'), h.get('average_price'),
+                 h.get('last_price'), h.get('pnl'), now)
+                for h in holdings
+            ])
+
+        cur.execute("DELETE FROM kite_gtt_snapshot")
+        if gtts:
+            cur.executemany("""
+                INSERT INTO kite_gtt_snapshot
+                    (gtt_id, symbol, status, trigger_price, last_price, quantity,
+                     sell_price, created_at, expires_at, synced_at)
+                VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)
+            """, [
+                (str(g.get('id')) if g.get('id') is not None else None, g.get('symbol'),
+                 g.get('status'), g.get('trigger_price'), g.get('last_price'),
+                 g.get('quantity'), g.get('sell_price'), g.get('created_at'),
+                 g.get('expires_at'), now)
+                for g in gtts
+            ])
+
+        cur.execute("DELETE FROM kite_orders_snapshot")
+        if orders:
+            cur.executemany("""
+                INSERT INTO kite_orders_snapshot
+                    (order_id, order_timestamp, tradingsymbol, transaction_type, order_type,
+                     quantity, filled_quantity, price, average_price, status, synced_at)
+                VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11)
+            """, [
+                (str(o.get('order_id')) if o.get('order_id') is not None else None,
+                 o.get('order_timestamp'), o.get('tradingsymbol'), o.get('transaction_type'),
+                 o.get('order_type'), o.get('quantity'), o.get('filled_quantity'),
+                 o.get('price'), o.get('average_price'), o.get('status'), now)
+                for o in orders
+            ])
+
+        conn.commit()
+        return now
+    finally:
+        conn.close()
+
+
+def get_kite_holdings():
+    """Last-synced Kite holdings snapshot, as a list of dicts (matches the
+    shape the old live-fetch code returned, so downstream code in
+    kite_data.py didn't need to change)."""
+    df = _df("SELECT tradingsymbol, quantity, average_price, last_price, pnl FROM kite_holdings_snapshot")
+    return df.to_dict('records')
+
+
+def get_kite_gtts():
+    """Last-synced, already-flattened GTT snapshot."""
+    df = _df("""
+        SELECT gtt_id AS id, symbol, status, trigger_price, last_price,
+               quantity, sell_price, created_at, expires_at
+        FROM kite_gtt_snapshot
     """)
+    return df.to_dict('records')
 
 
-def open_trades_missing_target():
-    """Open trades with no target price set yet — can't get a GTT until
-    this is filled in on the Set Targets page."""
-    return _df("""
-        SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
-               my_buy_qty, my_buy_price, invested_amount
-        FROM trades
-        WHERE status = 'Open' AND target_price IS NULL
-        ORDER BY buy_date DESC
+def get_kite_orders():
+    """Last-synced order book snapshot."""
+    df = _df("""
+        SELECT order_id, order_timestamp, tradingsymbol, transaction_type,
+               order_type, quantity, filled_quantity, price, average_price, status
+        FROM kite_orders_snapshot
     """)
+    return df.to_dict('records')
+
+
+def get_kite_last_synced():
+    """Timestamp of the last successful Kite sync, or None if never synced."""
+    df = _df("SELECT MAX(synced_at) AS synced_at FROM kite_holdings_snapshot")
+    if df.empty or pd.isna(df.iloc[0]['synced_at']):
+        return None
+    return df.iloc[0]['synced_at']
 
 
 # ── Write operations ─────────────────────────────────────────────
@@ -389,5 +471,3 @@ if __name__ == '__main__':
     print("\nCategory status:")
     print(category_status().to_string())
     print("\nPerformance summary:", performance_summary())
-    print("\nGTT coverage:")
-    print(gtt_coverage().to_string())

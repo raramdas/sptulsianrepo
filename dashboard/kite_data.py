@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-kite_data.py — read-only Kite/Zerodha live data for the dashboard (holdings,
-GTT triggers, today's order book). Same enctoken-based login as
-kite_client.py/kite_common.py (the bot side), reused here rather than
-duplicated, and reimplemented as read-only for the dashboard.
+kite_data.py — Kite/Zerodha data for the dashboard (holdings, GTT triggers,
+today's order book).
 
-The dashboard's Oracle `trades` table reflects what the bots *recorded*, not
-necessarily today's broker truth (a GTT can trigger before the reconciliation
-script runs, an order can get rejected, etc). This module fetches live state
-directly from Kite so the Overview page can show and cross-check against it.
+IMPORTANT: this module does NOT call Kite's live API on every dashboard
+view. It used to, but per explicit preference (avoid drawing Zerodha's
+attention / rate limiting with frequent automated API calls from a
+customer-facing web app), the only live Kite call left is sync_now() —
+triggered exclusively by the "Sync Kite Data" button on Overview. Every
+other function here reads back the last-synced snapshot from Oracle
+(kite_holdings_snapshot / kite_gtt_snapshot / kite_orders_snapshot,
+written by db.save_kite_snapshot()).
 
-Login is cached process-wide via st.cache_resource so a page view doesn't
-trigger a fresh Kite login (password + TOTP) every time — that would risk
-tripping Zerodha's login rate limiting across every dashboard viewer/rerun.
-Data calls are cached briefly (60s) so navigating between pages doesn't
-refetch on every rerun either.
+Same enctoken-based login as kite_client.py/kite_common.py (the bot side),
+reused here rather than duplicated.
 """
 import os
 import requests
@@ -22,6 +21,8 @@ import pyotp
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
+
+import db
 
 load_dotenv('/home/ubuntu/.env')
 
@@ -38,8 +39,9 @@ def kite_headers(enctoken):
 
 @st.cache_resource(ttl=4 * 3600)
 def _get_enctoken():
-    """Log into Kite via TOTP. Cached process-wide for 4 hours so this runs
-    at most a handful of times a day, not on every dashboard view."""
+    """Log into Kite via TOTP. Cached process-wide for 4 hours — mostly
+    irrelevant now that syncing is manual/infrequent, but still avoids a
+    double-login if Sync is clicked twice in quick succession."""
     if not (ZERODHA_USER_ID and ZERODHA_PASSWORD and TOTP_SECRET):
         raise RuntimeError("Kite credentials not found in /home/ubuntu/.env "
                             "(ZERODHA_USER_ID / ZERODHA_PASSWORD / ZERODHA_TOTP_SECRET)")
@@ -74,22 +76,60 @@ def _get(path):
     return data.get('data', [])
 
 
-@st.cache_data(ttl=60)
+def _flatten_raw_gtts(raw_gtts):
+    """Flatten Kite's nested GTT trigger objects (condition/orders) into flat
+    rows — done once at sync time so the Oracle table can just be a normal
+    flat table."""
+    rows = []
+    for g in raw_gtts:
+        cond = g.get('condition') or {}
+        gtt_orders = g.get('orders') or [{}]
+        o = gtt_orders[0] if gtt_orders else {}
+        rows.append({
+            'id': g.get('id'),
+            'symbol': cond.get('tradingsymbol'),
+            'status': g.get('status'),
+            'trigger_price': (cond.get('trigger_values') or [None])[0],
+            'last_price': cond.get('last_price'),
+            'quantity': o.get('quantity'),
+            'sell_price': o.get('price'),
+            'created_at': g.get('created_at'),
+            'expires_at': g.get('expires_at'),
+        })
+    return rows
+
+
+def sync_now():
+    """The ONLY code path in this module that calls Kite's live API.
+    Fetches holdings/GTTs/orders and persists them to Oracle; everything
+    else here reads that snapshot back. Manually triggered only (the 'Sync
+    Kite Data' button on Overview) — no scheduled polling."""
+    holdings = _get('/portfolio/holdings')
+    raw_gtts = _get('/gtt/triggers')
+    orders = _get('/orders')
+    flat_gtts = _flatten_raw_gtts(raw_gtts)
+    synced_at = db.save_kite_snapshot(holdings, flat_gtts, orders)
+    return {'holdings': len(holdings), 'gtts': len(flat_gtts), 'orders': len(orders), 'synced_at': synced_at}
+
+
+def last_synced_at():
+    """When the Oracle snapshot was last refreshed, or None if never synced."""
+    return db.get_kite_last_synced()
+
+
 def get_holdings():
-    """Live equity holdings: quantity, average_price, last_price, pnl, etc."""
-    return _get('/portfolio/holdings')
+    """Last-synced holdings snapshot from Oracle — NOT a live call."""
+    return db.get_kite_holdings()
 
 
-@st.cache_data(ttl=60)
 def get_gtts():
-    """All GTT triggers (any status) currently on the account."""
-    return _get('/gtt/triggers')
+    """Last-synced, already-flattened GTT snapshot from Oracle."""
+    return db.get_kite_gtts()
 
 
-@st.cache_data(ttl=60)
 def get_orders():
-    """Full order book for the trading day."""
-    return _get('/orders')
+    """Last-synced order book snapshot from Oracle."""
+    return db.get_kite_orders()
 
 
 def holdings_summary():
@@ -120,7 +160,7 @@ def orders_today_summary():
 
 
 def tag_holdings_with_category(open_trades_df):
-    """Return every live Kite holding tagged with the Oracle category it
+    """Return every synced Kite holding tagged with the Oracle category it
     belongs to (by trading symbol), or category_name=None if the symbol has
     no matching 'Open' trade in Oracle at all.
 
@@ -184,16 +224,15 @@ def tag_holdings_with_category(open_trades_df):
 
 def unrealized_pnl_for_oracle_trades(open_trades_df):
     """Unrealized P&L for Oracle's own recorded Open trades only — priced
-    against live Kite last_price (matched by symbol). Deliberately NOT the
-    full holdings-reconciliation view (that's what tag_holdings_with_category
-    is for) — this stays scoped to exactly what Oracle's Budget Tracking
-    already claims is open, just marked to live market price instead of
-    buy price, so it answers 'how is Oracle's own bookkeeping doing right
-    now' rather than 'what does the whole broker account look like'.
+    against the last-synced Kite last_price (matched by symbol). Deliberately
+    NOT the full holdings-reconciliation view (that's what
+    tag_holdings_with_category is for) — this stays scoped to exactly what
+    Oracle's Budget Tracking already claims is open, just marked to market
+    price instead of buy price.
 
     Returns (total_pnl, unpriced_count) — unpriced_count is how many open
-    trades had no matching live quote (e.g. sold outside Oracle, delisted,
-    symbol renamed) and were excluded from the total.
+    trades had no matching synced quote (e.g. sold outside Oracle, delisted,
+    symbol renamed, or nothing synced yet) and were excluded from the total.
     """
     if open_trades_df is None or open_trades_df.empty:
         return 0.0, 0
@@ -211,37 +250,15 @@ def unrealized_pnl_for_oracle_trades(open_trades_df):
 
 
 def open_orders_count():
-    """Orders currently OPEN at the broker — triggered GTT sells and pending
-    buy orders not yet filled."""
+    """Orders currently OPEN at the broker (as of last sync) — triggered
+    GTT sells and pending buy orders not yet filled."""
     return sum(1 for o in get_orders() if str(o.get('status', '')).upper() == 'OPEN')
 
 
-def flatten_gtts(gtts=None):
-    """Flatten Kite's nested GTT trigger objects (condition/orders) into flat
-    rows suitable for a table."""
-    gtts = gtts if gtts is not None else get_gtts()
-    rows = []
-    for g in gtts:
-        cond = g.get('condition') or {}
-        orders = g.get('orders') or [{}]
-        o = orders[0] if orders else {}
-        rows.append({
-            'id': g.get('id'),
-            'symbol': cond.get('tradingsymbol'),
-            'status': g.get('status'),
-            'trigger_price': (cond.get('trigger_values') or [None])[0],
-            'last_price': cond.get('last_price'),
-            'quantity': o.get('quantity'),
-            'sell_price': o.get('price'),
-            'created_at': g.get('created_at'),
-            'expires_at': g.get('expires_at'),
-        })
-    return rows
-
-
 if __name__ == '__main__':
-    # Read-only smoke test against the live account — run manually on the VM
-    # to sanity-check endpoint shapes before wiring into the dashboard.
+    # Read-only smoke test against the live account — run manually on the VM.
+    # sync_now() is the only live call; everything else reads Oracle back.
+    print("Sync result:", sync_now())
     print("Holdings summary:", holdings_summary())
     print("GTT summary:", {k: v for k, v in gtt_summary().items() if k != 'raw'})
     print("Orders today summary:", {k: v for k, v in orders_today_summary().items() if k != 'raw'})

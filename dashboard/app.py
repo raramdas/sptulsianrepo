@@ -11,7 +11,6 @@ Pages:
   - Overview            deployment gauge, KPI cards, category allocation bars
   - Category Drill-Down  category -> stock-type -> individual trades
   - Performance          realized P&L trend, win rate, category breakdown
-  - GTT Coverage         open trades with a target but no GTT placed yet
   - Set Targets          set target price / timeframe / have-interest per trade
   - Trades Explorer      filterable, searchable, CSV export
   - Orders               live Kite order book + GTT triggers, filterable
@@ -104,15 +103,23 @@ def page_overview():
     st.title("Portfolio Overview")
 
     st.markdown("### Live Broker Snapshot (Kite)")
-    st.caption("Fetched directly from your Zerodha account — holdings, GTTs, and today's order "
-               "book. This is the actual broker state; the budget tracking below is Capital "
-               "Ledger's own bookkeeping in Oracle and can drift from it.")
+    synced_at = kite_data.last_synced_at()
+    if synced_at:
+        st.caption(f"From your Zerodha account as of last sync: **{synced_at.strftime('%Y-%m-%d %H:%M:%S')}**. "
+                   "This isn't live — click Sync to refresh. The budget tracking below is Capital "
+                   "Ledger's own bookkeeping in Oracle and can drift from this snapshot.")
+    else:
+        st.caption("Not synced yet — click 'Sync Kite Data' below to pull your holdings, GTTs, "
+                   "and order book from Zerodha.")
 
-    if st.button("Refresh Kite data"):
-        kite_data.get_holdings.clear()
-        kite_data.get_gtts.clear()
-        kite_data.get_orders.clear()
-        st.rerun()
+    if st.button("Sync Kite Data"):
+        with st.spinner("Logging into Kite and syncing…"):
+            try:
+                result = kite_data.sync_now()
+                st.success(f"Synced: {result['holdings']} holdings, {result['gtts']} GTTs, "
+                           f"{result['orders']} orders.")
+            except Exception as e:
+                st.error(f"Sync failed: {e}")
 
     open_trades_df = db.trades(status='Open')
 
@@ -186,7 +193,7 @@ def page_overview():
                                "below and your real broker state.")
                     _render_holdings(unmapped)
     except Exception as e:
-        st.warning(f"Couldn't reach Kite for live data — showing Oracle-only figures below. ({e})")
+        st.warning(f"Couldn't read the Kite snapshot from Oracle — showing Oracle-only figures below. ({e})")
 
     st.divider()
 
@@ -227,7 +234,7 @@ def page_overview():
     except Exception as e:
         with p2:
             st.markdown(theme.kpi_card("Unrealized P&L", "—"), unsafe_allow_html=True)
-            st.caption(f"Couldn't reach Kite for live pricing ({e})")
+            st.caption(f"Couldn't read the Kite snapshot for live pricing ({e})")
         with p3:
             st.markdown(theme.kpi_card("Total P&L", "—"), unsafe_allow_html=True)
 
@@ -283,7 +290,7 @@ def page_drilldown():
 
 def page_performance():
     st.title("Performance")
-    st.caption("Realized P&L from closed trades. Open positions aren't counted until closed.")
+    st.caption("Realized P&L by category, from closed trades. Open positions aren't counted until closed.")
 
     summary = db.performance_summary()
     c1, c2, c3, c4 = st.columns(4)
@@ -297,18 +304,6 @@ def page_performance():
     with c4:
         st.markdown(theme.kpi_card("Avg Holding (days)", summary['avg_holding_days']), unsafe_allow_html=True)
 
-    best, worst = summary['best_trade'], summary['worst_trade']
-    if best is not None and worst is not None:
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(theme.kpi_card(
-                f"Best Trade — {best['stock_name']} ({best['symbol']})",
-                fmt(best['my_gain_loss']), tone="positive"), unsafe_allow_html=True)
-        with c2:
-            st.markdown(theme.kpi_card(
-                f"Worst Trade — {worst['stock_name']} ({worst['symbol']})",
-                fmt(worst['my_gain_loss']), tone="negative"), unsafe_allow_html=True)
-
     st.markdown("### Cumulative Realized P&L")
     trend = db.cumulative_pnl_by_month()
     if trend.empty:
@@ -316,71 +311,20 @@ def page_performance():
     else:
         st.plotly_chart(theme.render_line_chart(trend, 'month', 'cumulative_pnl'), use_container_width=True)
 
-    st.markdown("### Realized P&L by Category")
-    cat_pnl = db.category_pnl_breakdown()
-    if cat_pnl.empty:
+    st.markdown("### Performance by Category")
+    cat_perf = db.performance_by_category()
+    if cat_perf.empty:
         st.info("No closed trades yet.")
     else:
+        display = cat_perf.rename(columns={
+            'category_name': 'Category', 'realized_pnl': 'Realized P&L',
+            'trade_count': 'Closed Trades', 'win_rate': 'Win Rate %',
+            'avg_holding_days': 'Avg Holding (days)',
+        })
         st.markdown(
-            theme.render_table(cat_pnl.rename(columns={'realized_pnl': 'realized_pnl'}),
-                               money_cols=['realized_pnl'], gain_col='realized_pnl'),
+            theme.render_table(display, money_cols=['Realized P&L'], gain_col='Realized P&L'),
             unsafe_allow_html=True
         )
-
-    st.markdown("### Closed Trades")
-    closed = db.realized_performance()
-    if closed.empty:
-        st.info("No closed trades yet.")
-    else:
-        money_cols = ['my_buy_price', 'invested_amount', 'my_sell_price', 'my_gain_loss']
-        display_cols = [c for c in closed.columns if c != 'trade_id']
-        st.markdown(theme.render_table(closed[display_cols], money_cols=money_cols, gain_col='my_gain_loss'),
-                    unsafe_allow_html=True)
-
-
-def page_gtt_coverage():
-    st.title("GTT Coverage")
-    st.caption("Open trades with a target price set: which ones already have a GTT sell order placed, "
-               "and which are still missing one.")
-
-    cov = db.gtt_coverage()
-    missing_target = db.open_trades_missing_target()
-
-    covered = cov[cov['gtt_id'].notna()] if not cov.empty else cov
-    missing_gtt = cov[cov['gtt_id'].isna()] if not cov.empty else cov
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown(theme.kpi_card("GTT Placed", len(covered), tone="positive"), unsafe_allow_html=True)
-    with c2:
-        tone = "negative" if len(missing_gtt) > 0 else "default"
-        st.markdown(theme.kpi_card("Missing GTT (target set)", len(missing_gtt), tone=tone), unsafe_allow_html=True)
-    with c3:
-        st.markdown(theme.kpi_card("No Target Set Yet", len(missing_target)), unsafe_allow_html=True)
-
-    st.markdown("### Missing GTT — needs an order placed")
-    if missing_gtt.empty:
-        st.success("Every open trade with a target price has a GTT order placed.")
-    else:
-        money_cols = ['my_buy_price', 'invested_amount', 'target_price']
-        display_cols = [c for c in missing_gtt.columns if c != 'trade_id']
-        st.markdown(theme.render_table(missing_gtt[display_cols], money_cols=money_cols), unsafe_allow_html=True)
-        csv = missing_gtt.to_csv(index=False).encode('utf-8')
-        st.download_button("Download missing-GTT list (CSV)", csv, "missing_gtt.csv", "text/csv")
-
-    st.markdown("### GTT Already Placed")
-    if covered.empty:
-        st.info("No trades with a GTT placed yet.")
-    else:
-        money_cols = ['my_buy_price', 'invested_amount', 'target_price']
-        display_cols = [c for c in covered.columns if c != 'trade_id']
-        st.markdown(theme.render_table(covered[display_cols], money_cols=money_cols), unsafe_allow_html=True)
-
-    if not missing_target.empty:
-        with st.expander(f"Open trades with no target set yet ({len(missing_target)}) — set on the Set Targets page"):
-            money_cols = ['my_buy_price', 'invested_amount']
-            display_cols = [c for c in missing_target.columns if c != 'trade_id']
-            st.markdown(theme.render_table(missing_target[display_cols], money_cols=money_cols), unsafe_allow_html=True)
 
 
 def _render_trades_table(tdf):
@@ -449,42 +393,50 @@ def page_classification():
 
 def page_set_targets():
     st.title("Set Targets")
-    st.caption("Set the target price, timeframe, and have-interest flag for open trades — "
-               "read directly by the Oracle-based GTT bot (main_gtt_oracle.py).")
+    st.caption("Set target price and have-interest for open trades, directly in the table — "
+               "read by the Oracle-based GTT bot (main_gtt_oracle.py) on its next run.")
 
     open_trades = db.open_trades_for_targets()
     if open_trades.empty:
         st.info("No open trades.")
         return
 
-    options = {}
-    for _, r in open_trades.iterrows():
-        tgt = fmt(r['target_price']) if pd.notna(r['target_price']) else "— not set —"
-        options[f"#{r['trade_id']} {r['stock_name']} ({r['symbol']}) · buy {fmt(r['my_buy_price'])} · target {tgt}"] = r['trade_id']
+    HAVE_INTEREST_OPTIONS = ["", "Have Interest", "No Interest"]
 
-    choice = st.selectbox("Open trade", list(options.keys()))
-    tid = options[choice]
-    row = open_trades[open_trades['trade_id'] == tid].iloc[0]
+    base = open_trades[['trade_id', 'buy_date', 'stock_name', 'my_buy_price', 'target_price', 'have_interest']].copy()
+    base['have_interest'] = base['have_interest'].where(base['have_interest'].isin(HAVE_INTEREST_OPTIONS), "")
+    base['target_price'] = pd.to_numeric(base['target_price'], errors='coerce').fillna(0.0)
+    base = base.set_index('trade_id')
+    base.columns = ['Date', 'Script Name', 'Purchase Price', 'Target Price', 'Has Interest']
 
-    with st.form("target_form"):
-        target_price = st.number_input(
-            "Target price (₹)",
-            value=float(row['target_price']) if pd.notna(row['target_price']) else 0.0,
-            min_value=0.0, step=1.0, format="%.2f",
-        )
-        timeframe = st.text_input("Timeframe (e.g. '3 Months')", value=row['timeframe'] or "")
-        have_interest = st.selectbox(
-            "Have Interest (SPTulsian disclosure)",
-            ["", "Have Interest", "No Interest"],
-            index=["", "Have Interest", "No Interest"].index(row['have_interest']) if row['have_interest'] in ["", "Have Interest", "No Interest"] else 0,
-        )
-        if st.form_submit_button("Save target"):
-            if target_price <= 0:
-                st.error("Enter a target price greater than 0.")
-            else:
-                rows = db.update_trade_target(tid, target_price, have_interest, timeframe)
-                st.success(f"Trade #{tid} updated ({rows} row). GTT bot will pick this up on its next run.")
-                st.rerun()
+    edited = st.data_editor(
+        base,
+        column_config={
+            'Date': st.column_config.DateColumn(disabled=True),
+            'Script Name': st.column_config.TextColumn(disabled=True),
+            'Purchase Price': st.column_config.NumberColumn(disabled=True, format="₹%.2f"),
+            'Target Price': st.column_config.NumberColumn(format="₹%.2f", min_value=0.0, step=1.0),
+            'Has Interest': st.column_config.SelectboxColumn(options=HAVE_INTEREST_OPTIONS),
+        },
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        key='targets_editor',
+    )
+
+    if st.button("Save changes"):
+        timeframes = open_trades.set_index('trade_id')['timeframe']
+        changed = 0
+        for tid, row in edited.iterrows():
+            orig = base.loc[tid]
+            if row['Target Price'] != orig['Target Price'] or row['Has Interest'] != orig['Has Interest']:
+                db.update_trade_target(tid, row['Target Price'], row['Has Interest'], timeframes.loc[tid])
+                changed += 1
+        if changed:
+            st.success(f"Updated {changed} trade(s). GTT bot will pick these up on its next run.")
+            st.rerun()
+        else:
+            st.info("No changes to save.")
 
 
 def page_settings():
@@ -544,13 +496,12 @@ def page_settings():
 
 def page_orders():
     st.title("Orders")
-    st.caption("Live order book and GTT triggers directly from your Zerodha account — "
-               "open and executed orders, plus every GTT trigger on the account.")
-
-    if st.button("Refresh"):
-        kite_data.get_orders.clear()
-        kite_data.get_gtts.clear()
-        st.rerun()
+    synced_at = kite_data.last_synced_at()
+    if synced_at:
+        st.caption(f"Order book and GTT triggers as of last sync: **{synced_at.strftime('%Y-%m-%d %H:%M:%S')}** "
+                   "— not live. Use 'Sync Kite Data' on Overview to refresh.")
+    else:
+        st.caption("Not synced yet — go to Overview and click 'Sync Kite Data'.")
 
     try:
         view_options = ["Orders", "GTT Triggers"]
@@ -576,7 +527,7 @@ def page_orders():
                 st.markdown(theme.render_table(display, money_cols=['price', 'average_price'],
                                                status_col='status'), unsafe_allow_html=True)
         else:
-            gdf = pd.DataFrame(kite_data.flatten_gtts())
+            gdf = pd.DataFrame(kite_data.get_gtts())
             if gdf.empty:
                 st.info("No GTT triggers.")
             else:
@@ -589,7 +540,7 @@ def page_orders():
                 st.markdown(theme.render_table(fdf, money_cols=['trigger_price', 'last_price', 'sell_price'],
                                                status_col='status'), unsafe_allow_html=True)
     except Exception as e:
-        st.warning(f"Couldn't reach Kite for order data. ({e})")
+        st.warning(f"Couldn't read the Kite snapshot for order data. ({e})")
 
 
 # ── Main ─────────────────────────────────────────────────────────
@@ -598,7 +549,6 @@ PAGES = [
     "Overview",
     "Category Drill-Down",
     "Performance",
-    "GTT Coverage",
     "Set Targets",
     "Trades Explorer",
     "Orders",
@@ -638,8 +588,6 @@ def main():
             page_drilldown()
         elif page == "Performance":
             page_performance()
-        elif page == "GTT Coverage":
-            page_gtt_coverage()
         elif page == "Set Targets":
             page_set_targets()
         elif page == "Trades Explorer":
