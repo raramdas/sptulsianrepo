@@ -404,6 +404,7 @@ def page_set_targets():
     HAVE_INTEREST_OPTIONS = ["", "Have Interest", "No Interest"]
 
     base = open_trades[['trade_id', 'buy_date', 'stock_name', 'my_buy_price', 'target_price', 'have_interest']].copy()
+    base['have_interest'] = base['have_interest'].fillna("")
     base['have_interest'] = base['have_interest'].where(base['have_interest'].isin(HAVE_INTEREST_OPTIONS), "")
     base['target_price'] = pd.to_numeric(base['target_price'], errors='coerce').fillna(0.0)
     base = base.set_index('trade_id')
