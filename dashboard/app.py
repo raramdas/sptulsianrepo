@@ -623,7 +623,16 @@ def main():
     st.sidebar.caption(f"Signed in as **{st.session_state.get('user')}**")
     if 'nav_page' not in st.session_state:
         st.session_state['nav_page'] = PAGES[0]
-    page = st.sidebar.radio("Navigate", PAGES, label_visibility="collapsed", key='nav_page')
+    # Deliberately NOT keyed 'nav_page' — a widget's own key can't be
+    # reassigned after it's instantiated in the same run, which is exactly
+    # what the drill-down buttons on Overview need to do. 'nav_page' is a
+    # plain session_state value drill-down buttons set freely; this radio
+    # just reads it for its initial index and writes back on manual clicks.
+    page = st.sidebar.radio(
+        "Navigate", PAGES, label_visibility="collapsed",
+        index=PAGES.index(st.session_state['nav_page']), key='nav_radio',
+    )
+    st.session_state['nav_page'] = page
     if st.sidebar.button("Sign out"):
         st.session_state.clear()
         st.rerun()
