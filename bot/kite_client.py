@@ -239,6 +239,25 @@ def get_gtt_status(gtt_id, enctoken):
     return None
 
 
+def get_gtt_detail(gtt_id, enctoken):
+    """Full GTT detail — status, condition, and orders[].result (populated
+    once triggered, with the resulting order's info). Returns None on failure.
+    Needed to verify a GTT's sell order actually filled, rather than trusting
+    the top-level status alone (a GTT can show 'triggered' even when the
+    DAY-validity sell order it placed never filled and was cancelled at EOD)."""
+    try:
+        r = requests.get(
+            f'{OMS_BASE}/gtt/triggers/{gtt_id}',
+            headers=kite_headers(enctoken), timeout=10
+        )
+        data = r.json()
+        if data.get('status') == 'success':
+            return data['data']
+    except Exception as e:
+        log(f"  get_gtt_detail error for {gtt_id}: {e}")
+    return None
+
+
 if __name__ == '__main__':
     # Quick self-test: symbol resolution + market price (no login needed for these)
     for stock in ['Zee Ent', 'Vodafone Idea', 'Reliance Industries']:

@@ -256,7 +256,9 @@ def get_open_trades_with_target(scan_dates):
 
 
 def get_open_trades_with_gtt():
-    """Open trades that already have a GTT placed — for checking trigger status."""
+    """Open trades that already have a GTT placed — for checking trigger status.
+    Includes target_price/my_buy_qty/notes so a triggered-but-unfilled GTT
+    can be recreated at the same target without a second lookup."""
     conn = get_oracle_connection()
     if not conn:
         return []
@@ -265,7 +267,8 @@ def get_open_trades_with_gtt():
         # Same Oracle ''-is-NULL trap as get_open_trades_with_target() above —
         # gtt_id IS NOT NULL already excludes NULL/empty, only 'DRY_RUN' needs excluding.
         cursor.execute("""
-            SELECT trade_id, stock_name, symbol, gtt_id, buy_order_id
+            SELECT trade_id, stock_name, symbol, gtt_id, buy_order_id,
+                   target_price, my_buy_qty, notes
             FROM trades WHERE status = 'Open' AND gtt_id IS NOT NULL
               AND gtt_id <> 'DRY_RUN'
         """)
@@ -278,17 +281,24 @@ def get_open_trades_with_gtt():
         return []
 
 
-def set_gtt_placed_oracle(trade_id, gtt_id, dry_run=False):
+def set_gtt_placed_oracle(trade_id, gtt_id, dry_run=False, note=None):
     conn = get_oracle_connection()
     if not conn:
         return
     try:
         cursor = conn.cursor()
         status = 'DRY_RUN' if dry_run else 'PLACED'
-        cursor.execute("""
-            UPDATE trades SET gtt_id = :gtt_id, gtt_status = :status, updated_at = SYSTIMESTAMP
-            WHERE trade_id = :id
-        """, {'gtt_id': gtt_id, 'status': status, 'id': trade_id})
+        if note is not None:
+            cursor.execute("""
+                UPDATE trades SET gtt_id = :gtt_id, gtt_status = :status,
+                    notes = :note, updated_at = SYSTIMESTAMP
+                WHERE trade_id = :id
+            """, {'gtt_id': gtt_id, 'status': status, 'note': note, 'id': trade_id})
+        else:
+            cursor.execute("""
+                UPDATE trades SET gtt_id = :gtt_id, gtt_status = :status, updated_at = SYSTIMESTAMP
+                WHERE trade_id = :id
+            """, {'gtt_id': gtt_id, 'status': status, 'id': trade_id})
         conn.commit()
         cursor.close()
     except Exception as e:

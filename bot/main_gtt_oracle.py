@@ -12,11 +12,12 @@ isolated Oracle schema. One tenant's failure doesn't stop the others.
 Run directly:
     python3 main_gtt_oracle.py
 """
+import re
 from datetime import datetime, timedelta
 
 from config import log, GTT_DRY_RUN, IST
-from kite_client import get_enctoken_for, place_gtt, get_gtt_status
-from order_status import get_order_status
+from kite_client import get_enctoken_for, place_gtt, get_gtt_detail
+from order_status import get_order_status, find_sell_order_for_symbol
 from budget_manager import (
     get_open_trades_with_target, get_open_trades_with_gtt,
     set_gtt_placed_oracle, mark_trade_error_oracle, close_trade_in_oracle,
@@ -101,27 +102,89 @@ def run_for_tenant(tenant, conn):
             log(f"  Unknown status {kite_status} — skipping")
             gtt_skipped += 1
 
-    # ── Phase 2: check existing GTTs for triggers -> mark Closed ──────
+    # ── Phase 2: check existing GTTs. A GTT can leave 'active' state three
+    # ways: it triggered AND the sell filled (real close), it triggered but
+    # the DAY-validity sell order never filled, or it was cancelled outright.
+    # Only the first case should close the row — the other two mean nothing
+    # was actually sold, and get a fresh GTT at the same target instead of
+    # silently sitting there.
     active_gtts = get_open_trades_with_gtt(conn)
     log(f"Checking {len(active_gtts)} active GTT(s) for triggers")
 
+    gtt_recreated = 0
     for t in active_gtts:
-        stock   = t['stock_name']
-        gtt_id  = t['gtt_id']
-        buy_oid = t['buy_order_id']
+        trade_id = t['trade_id']
+        stock    = t['stock_name']
+        symbol   = t['symbol']
+        gtt_id   = t['gtt_id']
+        buy_oid  = t['buy_order_id']
+        target   = t.get('target_price')
+        my_qty   = t.get('my_buy_qty')
+        notes    = t.get('notes') or ''
 
-        gtt_status = get_gtt_status(gtt_id, enctoken)
-        log(f"{stock} | GTT {gtt_id} status: {gtt_status}")
+        detail = get_gtt_detail(gtt_id, enctoken)
+        if not detail:
+            log(f"{stock} | GTT {gtt_id} — could not fetch detail, skipping")
+            gtt_skipped += 1
+            continue
 
-        if gtt_status in ('TRIGGERED', 'EXECUTED'):
+        gtt_st = (detail.get('status') or '').upper()
+        log(f"{stock} | GTT {gtt_id} status: {gtt_st}")
+
+        if gtt_st == 'ACTIVE':
+            continue  # still waiting, nothing to do
+
+        cond = detail.get('condition', {})
+        sell_symbol = symbol or cond.get('tradingsymbol') or stock.upper().replace(' ', '')
+        try:
+            qty = int(float(my_qty)) if my_qty else None
+        except (TypeError, ValueError):
+            qty = None
+
+        # Look for the actual resulting sell order, rather than trusting
+        # the GTT's own status alone.
+        filled_order = None
+        for o in detail.get('orders', []):
+            result = o.get('result')
+            if result and result.get('order_id'):
+                filled_order = get_order_status(result['order_id'], enctoken)
+                break
+        if not filled_order and qty and sell_symbol:
+            filled_order = find_sell_order_for_symbol(sell_symbol, qty, enctoken)
+
+        sold_ok = bool(filled_order and filled_order['status'] == 'COMPLETE'
+                        and filled_order['filled_qty'] > 0)
+
+        if sold_ok:
             if GTT_DRY_RUN:
-                log(f"  [DRY RUN] Would mark {stock} as Closed")
+                log(f"  [DRY RUN] Would mark {stock} as Closed — sold "
+                    f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")
             else:
                 close_trade_in_oracle(conn, buy_oid, datetime.now(IST).date())
             gtt_closed += 1
-            log(f"  {stock} marked Closed — GTT triggered, budget recycled")
+            log(f"  {stock} marked Closed — GTT {gtt_st}, sell CONFIRMED filled")
+        else:
+            if not qty or not target or not sell_symbol:
+                log(f"  Cannot recreate GTT for trade #{trade_id} — missing qty/target/symbol")
+                gtt_skipped += 1
+                continue
+            m = re.search(r'Retry #(\d+)', notes)
+            new_retry = int(m.group(1)) + 1 if m else 1
+            note = f'Retry #{new_retry}: GTT {gtt_st.lower()} without a confirmed fill'
+            log(f"  GTT {gtt_st} with NO confirmed sell — recreating ({note})")
+            if GTT_DRY_RUN:
+                log(f"  [DRY RUN] Would recreate GTT SELL {qty} x {sell_symbol} @ {target}")
+            else:
+                try:
+                    new_gtt_id = place_gtt(sell_symbol, qty, float(target), None, enctoken)
+                    set_gtt_placed_oracle(conn, trade_id, new_gtt_id, note=note)
+                    log(f"  New GTT placed: {new_gtt_id}")
+                except Exception as e:
+                    log(f"  GTT recreate error: {e}")
+                    mark_trade_error_oracle(conn, trade_id, str(e))
+            gtt_recreated += 1
 
-    return {'placed': gtt_placed, 'skipped': gtt_skipped, 'closed': gtt_closed}
+    return {'placed': gtt_placed, 'skipped': gtt_skipped, 'closed': gtt_closed, 'recreated': gtt_recreated}
 
 
 def run():

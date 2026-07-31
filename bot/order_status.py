@@ -66,6 +66,32 @@ def get_holding_qty(symbol, enctoken):
     return 0
 
 
+def find_sell_order_for_symbol(symbol, qty, enctoken):
+    """Fallback: scan today's order book for a SELL/CNC order matching the
+    symbol (and ideally quantity), used when a GTT's `result` field doesn't
+    carry an order_id we can query directly. Returns the same dict shape as
+    get_order_status(), or None."""
+    orders = get_all_orders(enctoken)
+    candidates = [
+        o for o in orders
+        if o.get('tradingsymbol', '').upper() == symbol.upper()
+        and o.get('transaction_type') == 'SELL'
+        and o.get('product') == 'CNC'
+    ]
+    if not candidates:
+        return None
+    exact = [o for o in candidates if int(o.get('quantity', 0)) == qty]
+    pool = exact or candidates
+    pool.sort(key=lambda o: o.get('order_timestamp', ''))
+    o = pool[-1]
+    return {
+        'status':     o.get('status', '').upper(),
+        'filled_qty': int(o.get('filled_quantity', 0)),
+        'avg_price':  float(o.get('average_price', 0) or 0),
+        'symbol':     o.get('tradingsymbol', ''),
+    }
+
+
 def get_order_status(order_id, enctoken, symbol_hint=None):
     """Find order status and filled qty from Kite orders list.
     Falls back to holdings (persists across days) if the order isn't in today's list."""
