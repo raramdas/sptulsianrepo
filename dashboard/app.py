@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
 app.py — Streamlit dashboard for the Stock Tip Automation + Budget system.
-Visual design: capital-allocation ledger / vault (see theme.py for rationale).
+Visual design: clean minimal (Stripe/Linear-style) — see theme.py.
 
 Run:
-    cd /home/ubuntu/stock_bot_v4/dashboard
+    cd dashboard
     streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 
-Features:
-  - Login (basic, credentials from .env), brute-force lockout
-  - Overview: deployment gauge, ledger KPI cards, category allocation bars
-  - Drill-down: category -> stock-type -> individual trades
-  - Trades explorer with filters
-  - Cap classification lookup
-  - Edit: total budget, category %, manually close a trade
+Pages:
+  - Overview            deployment gauge, KPI cards, category allocation bars
+  - Category Drill-Down  category -> stock-type -> individual trades
+  - Performance          realized P&L trend, win rate, category breakdown
+  - GTT Coverage         open trades with a target but no GTT placed yet
+  - Set Targets          set target price / timeframe / have-interest per trade
+  - Trades Explorer      filterable, searchable, CSV export
+  - Classification       AMFI cap-type lookup
+  - Settings & Edits     total budget, category %, manually close a trade
 """
 import os
 import time
@@ -27,7 +29,7 @@ load_dotenv('/home/ubuntu/.env')
 import db
 import theme
 
-st.set_page_config(page_title="Stock Bot — Capital Ledger", page_icon="\U0001F48E", layout="wide")
+st.set_page_config(page_title="Stock Bot — Capital Ledger", page_icon="\U0001F4CA", layout="wide")
 theme.inject()
 
 # ── Simple auth with brute-force protection ──────────────────────
@@ -56,7 +58,7 @@ def check_login():
 
     left, mid, right = st.columns([1, 1.3, 1])
     with mid:
-        st.markdown("## \U0001F48E Capital Ledger")
+        st.markdown("## Capital Ledger")
         st.caption("Stock Bot — sign in to view your portfolio.")
 
         now = time.time()
@@ -106,7 +108,7 @@ def page_overview():
     with col_kpis:
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown(theme.kpi_card("Total Budget", fmt(s['total_budget']), tone="gold"), unsafe_allow_html=True)
+            st.markdown(theme.kpi_card("Total Budget", fmt(s['total_budget']), tone="accent"), unsafe_allow_html=True)
             st.markdown(theme.kpi_card("Available", fmt(s['available']), tone="positive"), unsafe_allow_html=True)
         with c2:
             st.markdown(theme.kpi_card("Invested (Open)", fmt(s['invested'])), unsafe_allow_html=True)
@@ -138,7 +140,7 @@ def page_drilldown():
     crow = cat[cat['category_name'] == category].iloc[0]
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown(theme.kpi_card("Category Budget", fmt(crow['category_budget']), tone="gold"), unsafe_allow_html=True)
+        st.markdown(theme.kpi_card("Category Budget", fmt(crow['category_budget']), tone="accent"), unsafe_allow_html=True)
     with c2:
         st.markdown(theme.kpi_card("Invested", fmt(crow['invested'])), unsafe_allow_html=True)
     with c3:
@@ -162,32 +164,149 @@ def page_drilldown():
     _render_trades_table(tdf)
 
 
+def page_performance():
+    st.title("Performance")
+    st.caption("Realized P&L from closed trades. Open positions aren't counted until closed.")
+
+    summary = db.performance_summary()
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        tone = "positive" if summary['total_realized'] >= 0 else "negative"
+        st.markdown(theme.kpi_card("Total Realized P&L", fmt(summary['total_realized']), tone=tone), unsafe_allow_html=True)
+    with c2:
+        st.markdown(theme.kpi_card("Win Rate", f"{summary['win_rate']}%", tone="accent"), unsafe_allow_html=True)
+    with c3:
+        st.markdown(theme.kpi_card("Closed Trades", summary['trade_count']), unsafe_allow_html=True)
+    with c4:
+        st.markdown(theme.kpi_card("Avg Holding (days)", summary['avg_holding_days']), unsafe_allow_html=True)
+
+    best, worst = summary['best_trade'], summary['worst_trade']
+    if best is not None and worst is not None:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(theme.kpi_card(
+                f"Best Trade — {best['stock_name']} ({best['symbol']})",
+                fmt(best['my_gain_loss']), tone="positive"), unsafe_allow_html=True)
+        with c2:
+            st.markdown(theme.kpi_card(
+                f"Worst Trade — {worst['stock_name']} ({worst['symbol']})",
+                fmt(worst['my_gain_loss']), tone="negative"), unsafe_allow_html=True)
+
+    st.markdown("### Cumulative Realized P&L")
+    trend = db.cumulative_pnl_by_month()
+    if trend.empty:
+        st.info("No closed trades yet — nothing to chart.")
+    else:
+        st.plotly_chart(theme.render_line_chart(trend, 'month', 'cumulative_pnl'), use_container_width=True)
+
+    st.markdown("### Realized P&L by Category")
+    cat_pnl = db.category_pnl_breakdown()
+    if cat_pnl.empty:
+        st.info("No closed trades yet.")
+    else:
+        st.markdown(
+            theme.render_table(cat_pnl.rename(columns={'realized_pnl': 'realized_pnl'}),
+                               money_cols=['realized_pnl'], gain_col='realized_pnl'),
+            unsafe_allow_html=True
+        )
+
+    st.markdown("### Closed Trades")
+    closed = db.realized_performance()
+    if closed.empty:
+        st.info("No closed trades yet.")
+    else:
+        money_cols = ['my_buy_price', 'invested_amount', 'my_sell_price', 'my_gain_loss']
+        display_cols = [c for c in closed.columns if c != 'trade_id']
+        st.markdown(theme.render_table(closed[display_cols], money_cols=money_cols, gain_col='my_gain_loss'),
+                    unsafe_allow_html=True)
+
+
+def page_gtt_coverage():
+    st.title("GTT Coverage")
+    st.caption("Open trades with a target price set: which ones already have a GTT sell order placed, "
+               "and which are still missing one.")
+
+    cov = db.gtt_coverage()
+    missing_target = db.open_trades_missing_target()
+
+    covered = cov[cov['gtt_id'].notna()] if not cov.empty else cov
+    missing_gtt = cov[cov['gtt_id'].isna()] if not cov.empty else cov
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(theme.kpi_card("GTT Placed", len(covered), tone="positive"), unsafe_allow_html=True)
+    with c2:
+        tone = "negative" if len(missing_gtt) > 0 else "default"
+        st.markdown(theme.kpi_card("Missing GTT (target set)", len(missing_gtt), tone=tone), unsafe_allow_html=True)
+    with c3:
+        st.markdown(theme.kpi_card("No Target Set Yet", len(missing_target)), unsafe_allow_html=True)
+
+    st.markdown("### Missing GTT — needs an order placed")
+    if missing_gtt.empty:
+        st.success("Every open trade with a target price has a GTT order placed.")
+    else:
+        money_cols = ['my_buy_price', 'invested_amount', 'target_price']
+        display_cols = [c for c in missing_gtt.columns if c != 'trade_id']
+        st.markdown(theme.render_table(missing_gtt[display_cols], money_cols=money_cols), unsafe_allow_html=True)
+        csv = missing_gtt.to_csv(index=False).encode('utf-8')
+        st.download_button("Download missing-GTT list (CSV)", csv, "missing_gtt.csv", "text/csv")
+
+    st.markdown("### GTT Already Placed")
+    if covered.empty:
+        st.info("No trades with a GTT placed yet.")
+    else:
+        money_cols = ['my_buy_price', 'invested_amount', 'target_price']
+        display_cols = [c for c in covered.columns if c != 'trade_id']
+        st.markdown(theme.render_table(covered[display_cols], money_cols=money_cols), unsafe_allow_html=True)
+
+    if not missing_target.empty:
+        with st.expander(f"Open trades with no target set yet ({len(missing_target)}) — set on the Set Targets page"):
+            money_cols = ['my_buy_price', 'invested_amount']
+            display_cols = [c for c in missing_target.columns if c != 'trade_id']
+            st.markdown(theme.render_table(missing_target[display_cols], money_cols=money_cols), unsafe_allow_html=True)
+
+
 def _render_trades_table(tdf):
     if tdf.empty:
         st.info("No trades.")
         return
     money_cols = ['my_buy_price', 'invested_amount', 'target_price', 'my_sell_price', 'my_gain_loss']
     display_cols = [c for c in tdf.columns if c not in ('trade_id',)]
-    st.markdown(theme.render_table(tdf[display_cols], money_cols=money_cols, status_col='status'),
+    st.markdown(theme.render_table(tdf[display_cols], money_cols=money_cols, status_col='status', gain_col='my_gain_loss'),
                 unsafe_allow_html=True)
 
 
 def page_trades():
     st.title("Trades Explorer")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns([1, 1, 1.4])
     with col1:
         status = st.selectbox("Status", ['All', 'Open', 'Closed', 'SKIPPED', 'ERROR'])
     with col2:
         cats = db.category_status()
         cat_options = ['All'] + (cats['category_name'].tolist() if not cats.empty else [])
         category = st.selectbox("Category", cat_options)
+    with col3:
+        symbol = st.text_input("Search symbol or stock name", placeholder="e.g. RELIANCE")
+
+    col4, col5 = st.columns(2)
+    with col4:
+        date_from = st.date_input("Buy date from", value=None)
+    with col5:
+        date_to = st.date_input("Buy date to", value=None)
 
     tdf = db.trades(
         status=None if status == 'All' else status,
         category=None if category == 'All' else category,
+        symbol=symbol or None,
+        date_from=date_from if date_from else None,
+        date_to=date_to if date_to else None,
     )
     st.caption(f"{len(tdf)} trade(s) found")
     _render_trades_table(tdf)
+
+    if not tdf.empty:
+        csv = tdf.to_csv(index=False).encode('utf-8')
+        st.download_button("Download results (CSV)", csv, "trades_export.csv", "text/csv")
 
 
 def page_classification():
@@ -199,7 +318,7 @@ def page_classification():
         cols = st.columns(len(summary))
         for col, (_, row) in zip(cols, summary.iterrows()):
             with col:
-                st.markdown(theme.kpi_card(row['cap_type'], int(row['count']), tone="gold"), unsafe_allow_html=True)
+                st.markdown(theme.kpi_card(row['cap_type'], int(row['count']), tone="accent"), unsafe_allow_html=True)
 
     st.markdown("### Symbol Lookup")
     sym = st.text_input("Search by NSE symbol or company name (e.g. RELIANCE or Zee)")
@@ -308,21 +427,24 @@ def page_settings():
 
 # ── Main ─────────────────────────────────────────────────────────
 
+PAGES = [
+    "Overview",
+    "Category Drill-Down",
+    "Performance",
+    "GTT Coverage",
+    "Set Targets",
+    "Trades Explorer",
+    "Classification",
+    "Settings & Edits",
+]
+
 def main():
     if not check_login():
         return
 
-    st.sidebar.markdown("## \U0001F48E Capital Ledger")
+    st.sidebar.markdown("## Capital Ledger")
     st.sidebar.caption(f"Signed in as **{st.session_state.get('user')}**")
-    page = st.sidebar.radio("Navigate", [
-        "\U0001F4CA Overview",
-        "\U0001F50D Category Drill-Down",
-        "\U0001F3AF Set Targets",
-        "\U0001F4D6 Trades Explorer",
-        "\U0001F3F7\uFE0F Classification",
-        "\u2699\uFE0F Settings & Edits",
-    ], label_visibility="collapsed")
-    page = page.split(" ", 1)[1]  # strip icon prefix for routing
+    page = st.sidebar.radio("Navigate", PAGES, label_visibility="collapsed")
     if st.sidebar.button("Sign out"):
         st.session_state.clear()
         st.rerun()
@@ -335,6 +457,10 @@ def main():
             page_overview()
         elif page == "Category Drill-Down":
             page_drilldown()
+        elif page == "Performance":
+            page_performance()
+        elif page == "GTT Coverage":
+            page_gtt_coverage()
         elif page == "Set Targets":
             page_set_targets()
         elif page == "Trades Explorer":

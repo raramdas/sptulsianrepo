@@ -1,144 +1,154 @@
 #!/usr/bin/env python3
 """
-theme.py — visual design system for the Stock Bot dashboard.
+theme.py — visual design system for the Capital Ledger dashboard.
 
-Concept: a capital-allocation LEDGER / VAULT. SPTulsian's own category names
-(Little Gems, Big Gems, Multibagger) are literally treasure names, so the
-aesthetic leans into that: deep ink background, antique gold accents, and a
-monospace ledger typeface for every number — this should read like a
-statement of account, not a generic admin template.
+Concept: clean, minimal, data-forward — Stripe/Linear aesthetic. White
+background, dark text, blue accent reserved for interactive elements and
+brand marks, color on numbers reserved strictly for positive/negative
+signal (never decorative). Tabular numerals throughout so money/qty columns
+align vertically.
+
+This replaces the earlier gold/vault ("ledger") direction — Rajesh picked
+the clean minimal option when shown three style directions.
 
 Colors
-  ink        #0F1620  page background
-  panel      #171F2C  card / surface background
-  panel-line #232D3D  borders, dividers
-  gold       #C9A227  brand accent — budget, headers, active nav
-  gold-dim   #8C7220  secondary gold (hover, subtle fills)
-  ink-text   #E8E6DF  primary text (warm parchment white)
-  muted      #8A94A6  secondary text, labels, captions
-  emerald    #4C9A6A  positive (available budget, gains)
-  rust       #C1553D  negative (over budget, losses, errors)
+  bg          #FFFFFF   page background
+  surface     #F8FAFC   subtle panel background (sidebar, hover states)
+  border      #E2E8F0   card borders, dividers
+  ink         #0F172A   primary text
+  muted       #64748B   secondary text, labels, captions
+  accent      #2563EB   brand / interactive accent (buttons, active nav, links)
+  accent-dim  #DBEAFE   accent tint (active nav background, subtle fills)
+  positive    #16A34A   gains, available budget
+  negative    #DC2626   losses, over-budget, errors
 
 Type
-  display : 'Fraunces'        — page titles / section headers only
-  body    : 'Inter'           — everything else (labels, buttons, prose)
-  mono    : 'JetBrains Mono'  — every number: money, qty, percentages, tables
+  body : 'Inter'      — everything (headers included, just heavier weight)
+  mono : tabular-nums  — applied via font-feature-settings on Inter itself,
+                         not a separate monospace face — keeps the clean
+                         look while still aligning digits in tables/KPIs.
 """
 import streamlit as st
 
-INK        = "#0F1620"
-PANEL      = "#171F2C"
-PANEL_LINE = "#232D3D"
-GOLD       = "#C9A227"
-GOLD_DIM   = "#8C7220"
-TEXT       = "#E8E6DF"
-MUTED      = "#8A94A6"
-EMERALD    = "#4C9A6A"
-RUST       = "#C1553D"
+BG        = "#FFFFFF"
+SURFACE   = "#F8FAFC"
+BORDER    = "#E2E8F0"
+INK       = "#0F172A"
+MUTED     = "#64748B"
+ACCENT    = "#2563EB"
+ACCENT_DIM = "#DBEAFE"
+POSITIVE  = "#16A34A"
+NEGATIVE  = "#DC2626"
 
 
 CSS = f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 
 html, body, [class*="css"] {{
-    font-family: 'Inter', sans-serif;
+    font-family: 'Inter', -apple-system, sans-serif;
 }}
 
-/* Base page + text colors — belt-and-suspenders on top of config.toml's
-   base="dark" theme, so nothing ever renders dark-on-dark. */
 .stApp {{
-    background-color: {INK};
-    color: {TEXT} !important;
+    background-color: {BG};
+    color: {INK} !important;
 }}
 .stApp, .stApp p, .stApp span, .stApp label, .stApp div {{
-    color: {TEXT};
+    color: {INK};
 }}
 [data-testid="stCaptionContainer"], .stCaption, small {{
     color: {MUTED} !important;
 }}
 
-/* Hide default Streamlit chrome for a cleaner ledger feel */
 #MainMenu {{visibility: hidden;}}
 footer {{visibility: hidden;}}
 header[data-testid="stHeader"] {{background: transparent;}}
 
-/* Page titles use the display serif, sparingly */
 h1, h2, h3 {{
-    font-family: 'Fraunces', serif !important;
-    color: {TEXT} !important;
+    font-family: 'Inter', sans-serif !important;
+    color: {INK} !important;
     letter-spacing: -0.01em;
+    font-weight: 700 !important;
 }}
-h1 {{ font-weight: 600 !important; border-bottom: 1px solid {PANEL_LINE}; padding-bottom: 0.6rem; margin-bottom: 1.2rem; }}
+h1 {{ border-bottom: 1px solid {BORDER}; padding-bottom: 0.6rem; margin-bottom: 1.2rem; font-size: 1.7rem !important; }}
 
-/* Sidebar — dark vault panel with guaranteed-legible text */
+/* Sidebar — light surface, blue active state */
 section[data-testid="stSidebar"] {{
-    background-color: {PANEL};
-    border-right: 1px solid {PANEL_LINE};
+    background-color: {SURFACE};
+    border-right: 1px solid {BORDER};
 }}
 section[data-testid="stSidebar"] * {{
-    color: {TEXT} !important;
+    color: {INK} !important;
 }}
 section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {{
     color: {MUTED} !important;
 }}
 section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {{
-    padding: 0.35rem 0;
-    font-size: 0.95rem;
+    padding: 0.4rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.92rem;
+    margin-bottom: 0.1rem;
+}}
+section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) {{
+    background-color: {ACCENT_DIM};
 }}
 
 /* Buttons */
-.stButton button, .stFormSubmitButton button {{
-    background-color: {GOLD};
-    color: {INK} !important;
-    border: none;
+.stButton button, .stFormSubmitButton button, .stDownloadButton button {{
+    background-color: {INK};
+    color: #FFFFFF !important;
+    border: 1px solid {INK};
     font-family: 'Inter', sans-serif;
     font-weight: 600;
     border-radius: 6px;
     transition: background-color 0.15s ease;
 }}
-.stButton button *, .stFormSubmitButton button * {{ color: {INK} !important; }}
-.stButton button:hover, .stFormSubmitButton button:hover {{
-    background-color: {GOLD_DIM};
+.stButton button *, .stFormSubmitButton button *, .stDownloadButton button * {{ color: #FFFFFF !important; }}
+.stButton button:hover, .stFormSubmitButton button:hover, .stDownloadButton button:hover {{
+    background-color: {ACCENT};
+    border-color: {ACCENT};
 }}
 
 /* Inputs */
 .stTextInput input, .stNumberInput input, .stSelectbox [data-baseweb="select"] > div, .stDateInput input {{
-    background-color: {PANEL} !important;
-    color: {TEXT} !important;
-    border: 1px solid {PANEL_LINE} !important;
-    font-family: 'JetBrains Mono', monospace !important;
+    background-color: {BG} !important;
+    color: {INK} !important;
+    border: 1px solid {BORDER} !important;
+    border-radius: 6px !important;
+    font-variant-numeric: tabular-nums;
+}}
+.stTextInput input:focus, .stNumberInput input:focus {{
+    border-color: {ACCENT} !important;
+    box-shadow: 0 0 0 1px {ACCENT} !important;
 }}
 
-/* Ledger KPI cards */
-.ledger-card {{
-    background-color: {PANEL};
-    border: 1px solid {PANEL_LINE};
-    border-left: 3px solid {GOLD};
-    border-radius: 8px;
+/* KPI cards */
+.kpi-card {{
+    background-color: {BG};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
     padding: 1.1rem 1.3rem;
     margin-bottom: 0.6rem;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.25);
 }}
-.ledger-card .label {{
+.kpi-card .label {{
     font-family: 'Inter', sans-serif;
     font-size: 0.72rem;
     font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.06em;
     color: {MUTED} !important;
     margin-bottom: 0.4rem;
 }}
-.ledger-card .value {{
-    font-family: 'JetBrains Mono', monospace;
+.kpi-card .value {{
     font-size: 1.6rem;
-    font-weight: 600;
-    color: {TEXT} !important;
+    font-weight: 700;
+    color: {INK} !important;
+    font-variant-numeric: tabular-nums;
     word-break: break-word;
 }}
-.ledger-card.tone-positive .value {{ color: {EMERALD} !important; }}
-.ledger-card.tone-negative .value {{ color: {RUST} !important; }}
-.ledger-card.tone-gold .value {{ color: {GOLD} !important; }}
+.kpi-card.tone-positive .value {{ color: {POSITIVE} !important; }}
+.kpi-card.tone-negative .value {{ color: {NEGATIVE} !important; }}
+.kpi-card.tone-accent .value {{ color: {ACCENT} !important; }}
 
 /* Category allocation bar */
 .cat-row {{ margin-bottom: 1.2rem; }}
@@ -146,87 +156,98 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {{
     display: flex; justify-content: space-between; align-items: baseline;
     flex-wrap: wrap;
     gap: 0.25rem 0.75rem;
-    font-family: 'Inter', sans-serif;
     margin-bottom: 0.35rem;
 }}
-.cat-row .cat-name {{ font-weight: 600; color: {TEXT} !important; font-size: 0.95rem; }}
+.cat-row .cat-name {{ font-weight: 600; color: {INK} !important; font-size: 0.95rem; }}
 .cat-row .cat-figures {{
-    font-family: 'JetBrains Mono', monospace;
     font-size: 0.8rem;
     color: {MUTED} !important;
+    font-variant-numeric: tabular-nums;
 }}
 .cat-track {{
-    width: 100%; height: 10px;
-    background-color: {PANEL_LINE};
-    border-radius: 5px;
+    width: 100%; height: 8px;
+    background-color: {BORDER};
+    border-radius: 4px;
     overflow: hidden;
 }}
 .cat-fill {{
     height: 100%;
-    background: linear-gradient(90deg, {GOLD_DIM}, {GOLD});
-    border-radius: 5px 0 0 5px;
+    background-color: {ACCENT};
+    border-radius: 4px 0 0 4px;
 }}
 .cat-fill.over {{
-    background: linear-gradient(90deg, {RUST}, #E0715A);
+    background-color: {NEGATIVE};
 }}
 
-/* Ledger table — horizontally scrollable on small screens instead of squashing */
+/* Table */
 .ledger-table-wrap {{
     overflow-x: auto;
     border-radius: 8px;
-    border: 1px solid {PANEL_LINE};
+    border: 1px solid {BORDER};
 }}
 .ledger-table {{
     width: 100%;
     min-width: 640px;
     border-collapse: collapse;
-    font-family: 'JetBrains Mono', monospace;
     font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
 }}
 .ledger-table th {{
     text-align: left;
-    font-family: 'Inter', sans-serif;
     font-size: 0.7rem;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: {MUTED} !important;
-    background-color: {PANEL};
-    border-bottom: 1px solid {GOLD_DIM};
+    background-color: {SURFACE};
+    border-bottom: 1px solid {BORDER};
     padding: 0.6rem 0.7rem;
     position: sticky;
     top: 0;
 }}
 .ledger-table td {{
     padding: 0.55rem 0.7rem;
-    border-bottom: 1px solid {PANEL_LINE};
-    color: {TEXT} !important;
+    border-bottom: 1px solid {BORDER};
+    color: {INK} !important;
     white-space: nowrap;
 }}
-.ledger-table tr:nth-child(even) td {{ background-color: rgba(255,255,255,0.02); }}
+.ledger-table tr:nth-child(even) td {{ background-color: {SURFACE}; }}
 .ledger-table td.num {{ text-align: right; }}
-.ledger-table td.status-open {{ color: {EMERALD} !important; font-weight: 600; }}
+.ledger-table td.status-open {{ color: {POSITIVE} !important; font-weight: 600; }}
 .ledger-table td.status-closed {{ color: {MUTED} !important; }}
-.ledger-table td.status-error, .ledger-table td.status-skipped {{ color: {RUST} !important; }}
+.ledger-table td.status-error, .ledger-table td.status-skipped {{ color: {NEGATIVE} !important; }}
+.ledger-table td.gain-pos {{ color: {POSITIVE} !important; font-weight: 600; }}
+.ledger-table td.gain-neg {{ color: {NEGATIVE} !important; font-weight: 600; }}
 
-/* Login form — st.form renders as one real container, safe to style directly */
+/* Login form */
 div[data-testid="stForm"] {{
-    background-color: {PANEL};
-    border: 1px solid {PANEL_LINE};
-    border-top: 3px solid {GOLD};
+    background-color: {BG};
+    border: 1px solid {BORDER};
+    border-top: 3px solid {ACCENT};
     border-radius: 10px;
     padding: 1.75rem;
-    box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+    box-shadow: 0 4px 16px rgba(15,23,42,0.06);
 }}
+
+/* Simple badge/pill, used for coverage status etc. */
+.pill {{
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+}}
+.pill.pill-positive {{ background-color: #DCFCE7; color: {POSITIVE}; }}
+.pill.pill-negative {{ background-color: #FEE2E2; color: {NEGATIVE}; }}
+.pill.pill-muted {{ background-color: {SURFACE}; color: {MUTED}; }}
 
 /* ── Mobile responsiveness ───────────────────────────────────── */
 @media (max-width: 640px) {{
-    h1 {{ font-size: 1.6rem !important; }}
-    h2, h3 {{ font-size: 1.2rem !important; }}
-    .ledger-card {{ padding: 0.85rem 1rem; }}
-    .ledger-card .value {{ font-size: 1.25rem; }}
+    h1 {{ font-size: 1.4rem !important; }}
+    h2, h3 {{ font-size: 1.1rem !important; }}
+    .kpi-card {{ padding: 0.85rem 1rem; }}
+    .kpi-card .value {{ font-size: 1.25rem; }}
     .cat-row .cat-header {{ flex-direction: column; align-items: flex-start; }}
-    .login-wrap {{ margin: 1rem auto 0 auto; padding: 1.5rem; }}
     div[data-testid="stForm"] {{ padding: 1.25rem; }}
     section[data-testid="stSidebar"] {{ min-width: 100% !important; }}
 }}
@@ -239,10 +260,10 @@ def inject():
 
 
 def kpi_card(label, value, tone="default"):
-    """Return HTML for a single ledger-style KPI card."""
+    """Return HTML for a single KPI card."""
     tone_class = f"tone-{tone}" if tone != "default" else ""
     return f"""
-    <div class="ledger-card {tone_class}">
+    <div class="kpi-card {tone_class}">
         <div class="label">{label}</div>
         <div class="value">{value}</div>
     </div>
@@ -267,36 +288,62 @@ def category_bar(name, budget, invested, available):
     """
 
 
+def pill(text, tone="muted"):
+    return f'<span class="pill pill-{tone}">{text}</span>'
+
+
 def render_gauge(utilization_pct, title="Portfolio Deployed"):
-    """Signature element: a vault-dial style gauge for budget utilization."""
+    """Signature element: a clean radial gauge for budget utilization."""
     import plotly.graph_objects as go
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=utilization_pct,
-        number={'suffix': "%", 'font': {'family': 'JetBrains Mono', 'size': 36, 'color': TEXT}},
+        number={'suffix': "%", 'font': {'family': 'Inter', 'size': 36, 'color': INK}},
         title={'text': title, 'font': {'family': 'Inter', 'size': 14, 'color': MUTED}},
         gauge={
             'axis': {'range': [0, 100], 'tickcolor': MUTED, 'tickfont': {'color': MUTED, 'size': 10}},
-            'bar': {'color': GOLD, 'thickness': 0.3},
-            'bgcolor': PANEL,
+            'bar': {'color': ACCENT, 'thickness': 0.3},
+            'bgcolor': BG,
             'borderwidth': 1,
-            'bordercolor': PANEL_LINE,
+            'bordercolor': BORDER,
             'steps': [
-                {'range': [0, 100], 'color': INK},
+                {'range': [0, 100], 'color': SURFACE},
             ],
         }
     ))
     fig.update_layout(
-        paper_bgcolor=PANEL,
-        font={'color': TEXT},
+        paper_bgcolor=BG,
+        font={'color': INK},
         height=260,
         margin=dict(l=30, r=30, t=50, b=20),
     )
     return fig
 
 
-def render_table(df, money_cols=None, status_col=None):
-    """Return HTML for a ledger-styled table from a DataFrame."""
+def render_line_chart(df, x, y, title=None):
+    """Clean line chart for cumulative P&L / trends over time."""
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df[x], y=df[y], mode='lines+markers',
+        line=dict(color=ACCENT, width=2.5),
+        marker=dict(size=5, color=ACCENT),
+        fill='tozeroy', fillcolor='rgba(37,99,235,0.08)',
+    ))
+    fig.update_layout(
+        title={'text': title, 'font': {'family': 'Inter', 'size': 14, 'color': MUTED}} if title else None,
+        paper_bgcolor=BG, plot_bgcolor=BG,
+        font={'color': INK, 'family': 'Inter'},
+        margin=dict(l=40, r=20, t=40, b=30),
+        height=300,
+        xaxis=dict(showgrid=False, color=MUTED),
+        yaxis=dict(showgrid=True, gridcolor=BORDER, color=MUTED, zeroline=True, zerolinecolor=BORDER),
+    )
+    return fig
+
+
+def render_table(df, money_cols=None, status_col=None, gain_col=None):
+    """Return HTML for a styled table from a DataFrame."""
     money_cols = money_cols or []
     cols = list(df.columns)
     header = "".join(f"<th>{c.replace('_', ' ').title()}</th>" for c in cols)
@@ -309,6 +356,11 @@ def render_table(df, money_cols=None, status_col=None):
             if status_col and c == status_col:
                 status_val = str(val).lower()
                 css_class += f" status-{status_val}"
+            if gain_col and c == gain_col and val not in (None, ''):
+                try:
+                    css_class += " gain-pos" if float(val) >= 0 else " gain-neg"
+                except (ValueError, TypeError):
+                    pass
             if c in money_cols and val not in (None, ''):
                 try:
                     val = f"₹{float(val):,.2f}"

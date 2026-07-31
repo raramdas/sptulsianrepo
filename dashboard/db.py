@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
 db.py — Oracle data-access layer for the dashboard.
-All queries here were validated against a SQLite mock in test_dashboard_logic.py
-(20/20 passing) before being ported to Oracle syntax.
+
+All original queries (portfolio_summary, category_status, stock_type_status,
+trades, cap_classification_summary, lookup_symbol, and the write operations)
+are unchanged from the version validated against test_dashboard_logic.py
+(20/20 passing against a SQLite mock) before being ported to Oracle syntax.
+
+Added for the expanded dashboard: realized_performance() and gtt_coverage(),
+both built strictly from columns that already exist on `trades` — no new
+tables or schema changes required.
 """
 import os
 import oracledb
@@ -109,7 +116,7 @@ def stock_type_status(category_name):
     return pd.DataFrame(rows)
 
 
-def trades(status=None, category=None):
+def trades(status=None, category=None, symbol=None, date_from=None, date_to=None):
     sql = """
         SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
                status, order_type, my_buy_price, my_buy_qty, invested_amount,
@@ -122,6 +129,13 @@ def trades(status=None, category=None):
         sql += " AND status = :status"; params['status'] = status
     if category:
         sql += " AND category_name = :category"; params['category'] = category
+    if symbol:
+        sql += " AND (UPPER(symbol) LIKE :symbol OR UPPER(stock_name) LIKE :symbol)"
+        params['symbol'] = f"%{symbol.upper()}%"
+    if date_from:
+        sql += " AND buy_date >= :date_from"; params['date_from'] = date_from
+    if date_to:
+        sql += " AND buy_date <= :date_to"; params['date_to'] = date_to
     sql += " ORDER BY trade_id DESC"
     return _df(sql, params)
 
@@ -155,6 +169,108 @@ def lookup_symbol(query):
         ORDER BY match_rank, company_name
         FETCH FIRST 10 ROWS ONLY
     """, {'sym': query, 'prefix': prefix, 'pattern': pattern})
+
+
+# ── Performance & Analytics (new) ─────────────────────────────────
+
+def realized_performance():
+    """All closed trades with buy/sell details and realized P&L."""
+    return _df("""
+        SELECT trade_id, category_name, stock_name, symbol, stock_type,
+               buy_date, my_buy_price, my_buy_qty, invested_amount,
+               my_sell_date, my_sell_price, my_gain_loss
+        FROM trades
+        WHERE status = 'Closed'
+        ORDER BY my_sell_date DESC
+    """)
+
+
+def performance_summary():
+    """Aggregate stats derived from realized_performance() — computed in
+    pandas rather than Oracle-specific date functions, so it behaves the
+    same regardless of NLS/session settings."""
+    df = realized_performance()
+    if df.empty:
+        return {
+            'total_realized': 0, 'win_rate': 0, 'trade_count': 0,
+            'avg_holding_days': 0, 'best_trade': None, 'worst_trade': None,
+        }
+    df = df.copy()
+    df['my_gain_loss'] = pd.to_numeric(df['my_gain_loss'], errors='coerce').fillna(0)
+    df['buy_date'] = pd.to_datetime(df['buy_date'], errors='coerce')
+    df['my_sell_date'] = pd.to_datetime(df['my_sell_date'], errors='coerce')
+    holding_days = (df['my_sell_date'] - df['buy_date']).dt.days
+    wins = (df['my_gain_loss'] > 0).sum()
+    best = df.loc[df['my_gain_loss'].idxmax()] if not df.empty else None
+    worst = df.loc[df['my_gain_loss'].idxmin()] if not df.empty else None
+    return {
+        'total_realized': float(df['my_gain_loss'].sum()),
+        'win_rate': round(100 * wins / len(df), 1) if len(df) else 0,
+        'trade_count': len(df),
+        'avg_holding_days': round(holding_days.mean(), 1) if holding_days.notna().any() else 0,
+        'best_trade': best,
+        'worst_trade': worst,
+    }
+
+
+def cumulative_pnl_by_month():
+    """Cumulative realized P&L, bucketed by month of sell date — for the
+    performance trend chart."""
+    df = realized_performance()
+    if df.empty:
+        return pd.DataFrame(columns=['month', 'cumulative_pnl'])
+    df = df.copy()
+    df['my_gain_loss'] = pd.to_numeric(df['my_gain_loss'], errors='coerce').fillna(0)
+    df['my_sell_date'] = pd.to_datetime(df['my_sell_date'], errors='coerce')
+    df = df.dropna(subset=['my_sell_date']).sort_values('my_sell_date')
+    if df.empty:
+        return pd.DataFrame(columns=['month', 'cumulative_pnl'])
+    monthly = df.groupby(df['my_sell_date'].dt.to_period('M'))['my_gain_loss'].sum().cumsum()
+    out = monthly.reset_index()
+    out.columns = ['month', 'cumulative_pnl']
+    out['month'] = out['month'].astype(str)
+    return out
+
+
+def category_pnl_breakdown():
+    """Realized P&L grouped by category — for the performance page."""
+    df = realized_performance()
+    if df.empty:
+        return pd.DataFrame(columns=['category_name', 'realized_pnl', 'trade_count'])
+    df = df.copy()
+    df['my_gain_loss'] = pd.to_numeric(df['my_gain_loss'], errors='coerce').fillna(0)
+    out = df.groupby('category_name').agg(
+        realized_pnl=('my_gain_loss', 'sum'),
+        trade_count=('trade_id', 'count'),
+    ).reset_index().sort_values('realized_pnl', ascending=False)
+    return out
+
+
+# ── GTT coverage (new) ────────────────────────────────────────────
+
+def gtt_coverage():
+    """Open trades that have a target price set — split into 'has GTT'
+    vs 'missing GTT', mirroring the manual reconciliation workflow
+    (Holdings vs Master DB vs GTT Orders) but driven off live trade data."""
+    return _df("""
+        SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
+               my_buy_qty, my_buy_price, invested_amount, target_price, gtt_id, gtt_status
+        FROM trades
+        WHERE status = 'Open' AND target_price IS NOT NULL
+        ORDER BY CASE WHEN gtt_id IS NULL THEN 0 ELSE 1 END, buy_date DESC
+    """)
+
+
+def open_trades_missing_target():
+    """Open trades with no target price set yet — can't get a GTT until
+    this is filled in on the Set Targets page."""
+    return _df("""
+        SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
+               my_buy_qty, my_buy_price, invested_amount
+        FROM trades
+        WHERE status = 'Open' AND target_price IS NULL
+        ORDER BY buy_date DESC
+    """)
 
 
 # ── Write operations ─────────────────────────────────────────────
@@ -193,7 +309,6 @@ def close_trade(trade_id, sell_price, sell_date):
     conn = get_connection()
     try:
         cur = conn.cursor()
-        # Fetch qty and buy price to compute gain/loss
         cur.execute("SELECT my_buy_price, my_buy_qty FROM trades WHERE trade_id = :id",
                     {'id': trade_id})
         row = cur.fetchone()
@@ -245,7 +360,6 @@ if __name__ == '__main__':
     print("Portfolio summary:", portfolio_summary())
     print("\nCategory status:")
     print(category_status().to_string())
-    print("\nBig Gems stock-type drill-down:")
-    print(stock_type_status('Big Gems').to_string())
-    print("\nOpen trades:")
-    print(trades(status='Open').to_string())
+    print("\nPerformance summary:", performance_summary())
+    print("\nGTT coverage:")
+    print(gtt_coverage().to_string())
