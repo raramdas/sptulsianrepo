@@ -152,10 +152,10 @@ def page_overview():
         tagged = kite_data.tag_holdings_with_category(open_trades_df)
         with st.expander(f"Holdings detail ({hs['count']})"):
             display_cols = ['symbol', 'quantity', 'average_price', 'last_price', 'pnl']
-            money_cols = ['average_price', 'last_price', 'pnl']
+            money_cols = ['average_cost', 'last_price', 'pnl']
 
             def _render_holdings(df):
-                d = df[display_cols].copy()
+                d = df[display_cols].rename(columns={'average_price': 'average_cost'}).copy()
                 d['quantity'] = d['quantity'].astype(int)
                 st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
 
