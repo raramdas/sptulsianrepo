@@ -19,6 +19,7 @@ refetch on every rerun either.
 import os
 import requests
 import pyotp
+import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -116,6 +117,74 @@ def orders_today_summary():
         s = o.get('status', 'UNKNOWN')
         counts[s] = counts.get(s, 0) + 1
     return {'total': len(orders), 'by_status': counts, 'raw': orders}
+
+
+def live_category_breakdown(open_trades_df):
+    """Attribute live Kite holdings to Oracle categories, by trading symbol,
+    so category-level figures reflect actual broker state rather than only
+    what Oracle's `trades` rows say.
+
+    open_trades_df: Oracle's open trades (needs symbol, category_name,
+    my_buy_qty columns — e.g. db.trades(status='Open')).
+
+    A symbol can span multiple categories (separate lots bought under
+    different categories) — in that case the live value is split across
+    categories in proportion to each category's share of Oracle-recorded
+    quantity for that symbol.
+
+    Returns (category_df, unmapped_df):
+      category_df — per-category invested/current_value/pnl (live)
+      unmapped_df — Kite holdings whose symbol has NO matching open trade in
+                    Oracle at all. This is the actionable reconciliation
+                    list: every row here is live money Kite knows about that
+                    Capital Ledger's own bookkeeping doesn't.
+    """
+    holdings = get_holdings()
+    if not holdings:
+        return pd.DataFrame(columns=['category_name', 'invested', 'current_value', 'pnl']), pd.DataFrame()
+
+    oracle_by_symbol = {}
+    if open_trades_df is not None and not open_trades_df.empty:
+        for sym, grp in open_trades_df.groupby(open_trades_df['symbol'].str.upper()):
+            total_qty = grp['my_buy_qty'].sum()
+            if total_qty:
+                oracle_by_symbol[sym] = [
+                    (row['category_name'], float(row['my_buy_qty']) / total_qty)
+                    for _, row in grp.iterrows()
+                ]
+
+    cat_totals = {}
+    unmapped = []
+    for h in holdings:
+        sym = (h.get('tradingsymbol') or '').upper()
+        qty = float(h.get('quantity') or 0)
+        avg = float(h.get('average_price') or 0)
+        ltp = float(h.get('last_price') or 0)
+        invested = qty * avg
+        current = qty * ltp
+        pnl = current - invested
+
+        shares = oracle_by_symbol.get(sym)
+        if not shares:
+            unmapped.append({
+                'symbol': sym, 'quantity': qty, 'average_price': avg,
+                'last_price': ltp, 'invested': invested,
+                'current_value': current, 'pnl': pnl,
+            })
+            continue
+        for cat_name, weight in shares:
+            c = cat_totals.setdefault(cat_name, {'invested': 0.0, 'current_value': 0.0, 'pnl': 0.0})
+            c['invested'] += invested * weight
+            c['current_value'] += current * weight
+            c['pnl'] += pnl * weight
+
+    category_df = pd.DataFrame(
+        [{'category_name': k, **v} for k, v in cat_totals.items()]
+    ).sort_values('invested', ascending=False) if cat_totals else pd.DataFrame(
+        columns=['category_name', 'invested', 'current_value', 'pnl'])
+    unmapped_df = pd.DataFrame(unmapped) if unmapped else pd.DataFrame(
+        columns=['symbol', 'quantity', 'average_price', 'last_price', 'invested', 'current_value', 'pnl'])
+    return category_df, unmapped_df
 
 
 if __name__ == '__main__':
