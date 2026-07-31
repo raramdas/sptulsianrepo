@@ -208,6 +208,10 @@ def get_open_trades_with_target(conn, scan_dates):
         cursor = conn.cursor()
         placeholders = ",".join(f":d{i}" for i in range(len(scan_dates)))
         params = {f"d{i}": d for i, d in enumerate(scan_dates)}
+        # Oracle treats '' as NULL, so `x NOT IN ('', 'DRY_RUN')` silently
+        # becomes `x NOT IN (NULL, 'DRY_RUN')` — which is never true for any
+        # x, matching zero rows always. buy_order_id IS NOT NULL above
+        # already excludes NULL/empty, so only 'DRY_RUN' needs excluding here.
         cursor.execute(f"""
             SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
                    target_price, buy_order_id, my_buy_qty
@@ -215,7 +219,7 @@ def get_open_trades_with_target(conn, scan_dates):
             WHERE status = 'Open' AND target_price IS NOT NULL AND gtt_id IS NULL
               AND TO_CHAR(buy_date, 'YYYY-MM-DD') IN ({placeholders})
               AND buy_order_id IS NOT NULL
-              AND buy_order_id NOT IN ('', 'DRY_RUN')
+              AND buy_order_id <> 'DRY_RUN'
         """, params)
         cols = [d[0].lower() for d in cursor.description]
         rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
@@ -232,10 +236,12 @@ def get_open_trades_with_gtt(conn):
         return []
     try:
         cursor = conn.cursor()
+        # Same Oracle ''-is-NULL trap as get_open_trades_with_target() above —
+        # gtt_id IS NOT NULL already excludes NULL/empty, only 'DRY_RUN' needs excluding.
         cursor.execute("""
             SELECT trade_id, stock_name, symbol, gtt_id, buy_order_id
             FROM trades WHERE status = 'Open' AND gtt_id IS NOT NULL
-              AND gtt_id NOT IN ('', 'DRY_RUN')
+              AND gtt_id <> 'DRY_RUN'
         """)
         cols = [d[0].lower() for d in cursor.description]
         rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
