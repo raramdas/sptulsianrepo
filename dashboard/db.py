@@ -12,6 +12,7 @@ both built strictly from columns that already exist on `trades` — no new
 tables or schema changes required.
 """
 import os
+import datetime
 import oracledb
 import pandas as pd
 from dotenv import load_dotenv
@@ -230,6 +231,52 @@ def cumulative_pnl_by_month():
     out.columns = ['month', 'cumulative_pnl']
     out['month'] = out['month'].astype(str)
     return out
+
+
+def _current_fy_range():
+    """Indian fiscal year: April 1 - March 31."""
+    today = datetime.date.today()
+    if today.month >= 4:
+        return datetime.date(today.year, 4, 1), datetime.date(today.year + 1, 3, 31)
+    return datetime.date(today.year - 1, 4, 1), datetime.date(today.year, 3, 31)
+
+
+def realized_pnl_fy():
+    """Realized P&L for the current Indian fiscal year (Apr 1 - Mar 31), from
+    Oracle's closed trades. (Kite's own P&L data lives in Zerodha Console,
+    which uses a separate login/session this dashboard's enctoken auth
+    can't reach — confirmed during the Aug 2026 Overview rework, so this is
+    computed from what Capital Ledger itself recorded instead.)"""
+    fy_start, fy_end = _current_fy_range()
+    label = f"FY{fy_start.year}-{str(fy_end.year)[2:]}"
+    df = realized_performance()
+    if df.empty:
+        return {'total_realized': 0.0, 'trade_count': 0, 'fy_label': label}
+    df = df.copy()
+    df['my_gain_loss'] = pd.to_numeric(df['my_gain_loss'], errors='coerce').fillna(0)
+    sell_date = pd.to_datetime(df['my_sell_date'], errors='coerce')
+    mask = (sell_date >= pd.Timestamp(fy_start)) & (sell_date <= pd.Timestamp(fy_end))
+    fy_df = df[mask]
+    return {'total_realized': float(fy_df['my_gain_loss'].sum()), 'trade_count': len(fy_df), 'fy_label': label}
+
+
+def category_pnl_breakdown_fy():
+    """Same as category_pnl_breakdown() but scoped to the current fiscal year."""
+    fy_start, fy_end = _current_fy_range()
+    df = realized_performance()
+    empty = pd.DataFrame(columns=['category_name', 'realized_pnl', 'trade_count'])
+    if df.empty:
+        return empty
+    df = df.copy()
+    df['my_gain_loss'] = pd.to_numeric(df['my_gain_loss'], errors='coerce').fillna(0)
+    sell_date = pd.to_datetime(df['my_sell_date'], errors='coerce')
+    mask = (sell_date >= pd.Timestamp(fy_start)) & (sell_date <= pd.Timestamp(fy_end))
+    df = df[mask]
+    if df.empty:
+        return empty
+    return df.groupby('category_name').agg(
+        realized_pnl=('my_gain_loss', 'sum'), trade_count=('trade_id', 'count')
+    ).reset_index().sort_values('realized_pnl', ascending=False)
 
 
 def category_pnl_breakdown():

@@ -14,6 +14,7 @@ Pages:
   - GTT Coverage         open trades with a target but no GTT placed yet
   - Set Targets          set target price / timeframe / have-interest per trade
   - Trades Explorer      filterable, searchable, CSV export
+  - Orders               live Kite order book + GTT triggers, filterable
   - Classification       AMFI cap-type lookup
   - Settings & Edits     total budget, category %, manually close a trade
 """
@@ -114,12 +115,20 @@ def page_overview():
         st.rerun()
 
     open_trades_df = db.trades(status='Open')
-    realized_pnl = db.performance_summary()['total_realized']
+    fy_perf = db.realized_pnl_fy()
+    realized_pnl = fy_perf['total_realized']
+
+    def _drill(nav_page, **filters):
+        st.session_state['nav_page'] = nav_page
+        for k, v in filters.items():
+            st.session_state[k] = v
+        st.rerun()
 
     try:
         hs = kite_data.holdings_summary()
         gs = kite_data.gtt_summary()
         os_ = kite_data.orders_today_summary()
+        open_orders = kite_data.open_orders_count()
 
         k1, k2, k3 = st.columns(3)
         with k1:
@@ -132,39 +141,72 @@ def page_overview():
         p1, p2, p3 = st.columns(3)
         with p1:
             tone = "positive" if realized_pnl >= 0 else "negative"
-            st.markdown(theme.kpi_card("Realized P&L (all-time)", fmt(realized_pnl), tone=tone), unsafe_allow_html=True)
+            st.markdown(theme.kpi_card(f"Realized P&L ({fy_perf['fy_label']})", fmt(realized_pnl), tone=tone), unsafe_allow_html=True)
         with p2:
             tone = "positive" if hs['pnl'] >= 0 else "negative"
             st.markdown(theme.kpi_card("Unrealized P&L (live)", fmt(hs['pnl']), tone=tone), unsafe_allow_html=True)
         with p3:
             total_pnl = realized_pnl + hs['pnl']
             tone = "positive" if total_pnl >= 0 else "negative"
-            st.markdown(theme.kpi_card("Total P&L (Realized + Unrealized)", fmt(total_pnl), tone=tone), unsafe_allow_html=True)
+            st.markdown(theme.kpi_card(f"Total P&L ({fy_perf['fy_label']} Realized + Live Unrealized)",
+                                       fmt(total_pnl), tone=tone), unsafe_allow_html=True)
 
         k5, k6, k7 = st.columns(3)
         with k5:
             st.markdown(theme.kpi_card("Active GTTs", gs['active'], tone="accent"), unsafe_allow_html=True)
+            if st.button("View →", key="drill_active_gtt"):
+                _drill("Orders", orders_view="GTT Triggers", gtt_status_filter="active")
         with k6:
-            st.markdown(theme.kpi_card("Total GTTs (any status)", gs['total']), unsafe_allow_html=True)
+            st.markdown(theme.kpi_card("Open Orders", open_orders, tone="accent"), unsafe_allow_html=True)
+            st.caption("Triggered GTTs + pending buy orders")
+            if st.button("View →", key="drill_open_orders"):
+                _drill("Orders", orders_view="Orders", orders_status_filter="OPEN")
         with k7:
             order_line = " · ".join(f"{k}: {v}" for k, v in os_['by_status'].items()) or "none"
             st.markdown(theme.kpi_card("Today's Orders", os_['total']), unsafe_allow_html=True)
             st.caption(order_line)
+            if st.button("View →", key="drill_todays_orders"):
+                _drill("Orders", orders_view="Orders", orders_status_filter="All")
 
+        tagged = kite_data.tag_holdings_with_category(open_trades_df)
         with st.expander(f"Holdings detail ({hs['count']})"):
-            hdf = pd.DataFrame(kite_data.get_holdings())
-            if not hdf.empty:
-                cols = [c for c in ['tradingsymbol', 'quantity', 'average_price', 'last_price', 'pnl']
-                        if c in hdf.columns]
-                st.markdown(theme.render_table(hdf[cols], money_cols=['average_price', 'last_price', 'pnl'],
-                                               gain_col='pnl'), unsafe_allow_html=True)
+            display_cols = ['symbol', 'quantity', 'average_price', 'last_price', 'pnl']
+            money_cols = ['average_price', 'last_price', 'pnl']
+
+            def _render_holdings(df):
+                d = df[display_cols].copy()
+                d['quantity'] = d['quantity'].astype(int)
+                st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
+
+            if tagged.empty:
+                st.info("No holdings.")
+            else:
+                mapped = tagged[tagged['category_name'].notna()]
+                unmapped = tagged[tagged['category_name'].isna()]
+
+                st.markdown(f"**Mapped to a category ({len(mapped)})**")
+                if mapped.empty:
+                    st.caption("None.")
+                else:
+                    for cat_name, grp in mapped.groupby('category_name'):
+                        st.caption(f"{cat_name} ({len(grp)})")
+                        _render_holdings(grp)
+
+                st.markdown(f"**Unmapped — not in any open Oracle trade ({len(unmapped)})**")
+                if unmapped.empty:
+                    st.caption("None.")
+                else:
+                    st.caption("These symbols show up in your live Kite holdings but have no matching "
+                               "'Open' row in Oracle's trades table — the gap between Budget Tracking "
+                               "below and your real broker state.")
+                    _render_holdings(unmapped)
 
         st.markdown("### Category Performance (Live)")
-        st.caption("Live Kite holdings attributed to each category via Oracle's category tagging, "
-                   "plus that category's all-time realized P&L. Categories with no live holdings "
-                   "mapped to them are omitted here (see Budget Tracking below for those).")
-        cat_live, unmapped = kite_data.live_category_breakdown(open_trades_df)
-        realized_by_cat = db.category_pnl_breakdown()
+        st.caption(f"Live Kite holdings attributed to each category via Oracle's category tagging, "
+                   f"plus that category's {fy_perf['fy_label']} realized P&L. Categories with no live "
+                   f"holdings mapped to them are omitted here (see Budget Tracking below for those).")
+        cat_live, _ = kite_data.live_category_breakdown(open_trades_df)
+        realized_by_cat = db.category_pnl_breakdown_fy()
         if not cat_live.empty:
             realized_map = dict(zip(realized_by_cat['category_name'], realized_by_cat['realized_pnl'])) \
                 if not realized_by_cat.empty else {}
@@ -177,18 +219,6 @@ def page_overview():
                 )
         else:
             st.info("No live holdings could be matched to a category yet.")
-
-        if not unmapped.empty:
-            unmapped_value = unmapped['current_value'].sum()
-            with st.expander(f"⚠ Unmapped holdings — in Kite but not in any open Oracle trade "
-                              f"({len(unmapped)}, {fmt(unmapped_value)} current value)"):
-                st.caption("These symbols show up in your live Kite holdings but have no matching "
-                           "'Open' row in Oracle's trades table — this is exactly the gap between "
-                           "Budget Tracking below and your real broker state. Reconcile by adding/"
-                           "correcting the corresponding trade rows.")
-                st.markdown(theme.render_table(
-                    unmapped, money_cols=['average_price', 'last_price', 'invested', 'current_value', 'pnl'],
-                    gain_col='pnl'), unsafe_allow_html=True)
     except Exception as e:
         st.warning(f"Couldn't reach Kite for live data — showing Oracle-only figures below. ({e})")
 
@@ -521,6 +551,56 @@ def page_settings():
                     st.rerun()
 
 
+def page_orders():
+    st.title("Orders")
+    st.caption("Live order book and GTT triggers directly from your Zerodha account — "
+               "open and executed orders, plus every GTT trigger on the account.")
+
+    if st.button("Refresh"):
+        kite_data.get_orders.clear()
+        kite_data.get_gtts.clear()
+        st.rerun()
+
+    try:
+        view_options = ["Orders", "GTT Triggers"]
+        if 'orders_view' not in st.session_state:
+            st.session_state['orders_view'] = view_options[0]
+        view = st.radio("View", view_options, horizontal=True, key='orders_view', label_visibility="collapsed")
+
+        if view == "Orders":
+            odf = pd.DataFrame(kite_data.get_orders())
+            if odf.empty:
+                st.info("No orders today.")
+            else:
+                status_options = ['All'] + sorted(odf['status'].dropna().unique().tolist())
+                if st.session_state.get('orders_status_filter') not in status_options:
+                    st.session_state['orders_status_filter'] = 'All'
+                status = st.selectbox("Status", status_options, key='orders_status_filter')
+                fdf = odf if status == 'All' else odf[odf['status'] == status]
+                st.caption(f"{len(fdf)} order(s)")
+                cols = [c for c in ['order_timestamp', 'tradingsymbol', 'transaction_type', 'order_type',
+                                    'quantity', 'filled_quantity', 'price', 'average_price', 'status']
+                        if c in fdf.columns]
+                display = fdf[cols].rename(columns={'tradingsymbol': 'symbol'})
+                st.markdown(theme.render_table(display, money_cols=['price', 'average_price'],
+                                               status_col='status'), unsafe_allow_html=True)
+        else:
+            gdf = pd.DataFrame(kite_data.flatten_gtts())
+            if gdf.empty:
+                st.info("No GTT triggers.")
+            else:
+                status_options = ['All'] + sorted(gdf['status'].dropna().unique().tolist())
+                if st.session_state.get('gtt_status_filter') not in status_options:
+                    st.session_state['gtt_status_filter'] = 'All'
+                status = st.selectbox("Status", status_options, key='gtt_status_filter')
+                fdf = gdf if status == 'All' else gdf[gdf['status'] == status]
+                st.caption(f"{len(fdf)} GTT trigger(s)")
+                st.markdown(theme.render_table(fdf, money_cols=['trigger_price', 'last_price', 'sell_price'],
+                                               status_col='status'), unsafe_allow_html=True)
+    except Exception as e:
+        st.warning(f"Couldn't reach Kite for order data. ({e})")
+
+
 # ── Main ─────────────────────────────────────────────────────────
 
 PAGES = [
@@ -530,6 +610,7 @@ PAGES = [
     "GTT Coverage",
     "Set Targets",
     "Trades Explorer",
+    "Orders",
     "Classification",
     "Settings & Edits",
 ]
@@ -540,7 +621,9 @@ def main():
 
     st.sidebar.markdown("## Capital Ledger")
     st.sidebar.caption(f"Signed in as **{st.session_state.get('user')}**")
-    page = st.sidebar.radio("Navigate", PAGES, label_visibility="collapsed")
+    if 'nav_page' not in st.session_state:
+        st.session_state['nav_page'] = PAGES[0]
+    page = st.sidebar.radio("Navigate", PAGES, label_visibility="collapsed", key='nav_page')
     if st.sidebar.button("Sign out"):
         st.session_state.clear()
         st.rerun()
@@ -561,6 +644,8 @@ def main():
             page_set_targets()
         elif page == "Trades Explorer":
             page_trades()
+        elif page == "Orders":
+            page_orders()
         elif page == "Classification":
             page_classification()
         elif page == "Settings & Edits":

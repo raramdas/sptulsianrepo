@@ -119,33 +119,38 @@ def orders_today_summary():
     return {'total': len(orders), 'by_status': counts, 'raw': orders}
 
 
-def live_category_breakdown(open_trades_df):
-    """Attribute live Kite holdings to Oracle categories, by trading symbol,
-    so category-level figures reflect actual broker state rather than only
-    what Oracle's `trades` rows say.
+def tag_holdings_with_category(open_trades_df):
+    """Return every live Kite holding tagged with the Oracle category it
+    belongs to (by trading symbol), or category_name=None if the symbol has
+    no matching 'Open' trade in Oracle at all.
 
     open_trades_df: Oracle's open trades (needs symbol, category_name,
     my_buy_qty columns — e.g. db.trades(status='Open')).
 
     A symbol can span multiple categories (separate lots bought under
-    different categories) — in that case the live value is split across
-    categories in proportion to each category's share of Oracle-recorded
-    quantity for that symbol.
+    different categories) — in that case it produces one row per category,
+    with invested/current_value/pnl split in proportion to each category's
+    share of Oracle-recorded quantity for that symbol.
 
-    Returns (category_df, unmapped_df):
-      category_df — per-category invested/current_value/pnl (live)
-      unmapped_df — Kite holdings whose symbol has NO matching open trade in
-                    Oracle at all. This is the actionable reconciliation
-                    list: every row here is live money Kite knows about that
-                    Capital Ledger's own bookkeeping doesn't.
+    This is the single source of truth for both the Holdings detail view
+    (grouped mapped-vs-unmapped) and the Category Performance rollup —
+    keeping them in one place so the two views can't drift apart.
     """
     holdings = get_holdings()
+    cols = ['symbol', 'category_name', 'quantity', 'average_price', 'last_price', 'invested', 'current_value', 'pnl']
     if not holdings:
-        return pd.DataFrame(columns=['category_name', 'invested', 'current_value', 'pnl']), pd.DataFrame()
+        return pd.DataFrame(columns=cols)
 
     oracle_by_symbol = {}
     if open_trades_df is not None and not open_trades_df.empty:
-        for sym, grp in open_trades_df.groupby(open_trades_df['symbol'].str.upper()):
+        by_sym_cat = open_trades_df.assign(
+            symbol_upper=open_trades_df['symbol'].str.upper()
+        ).groupby(['symbol_upper', 'category_name'])['my_buy_qty'].sum().reset_index()
+        for sym, grp in by_sym_cat.groupby('symbol_upper'):
+            # One weight per DISTINCT category for this symbol (lots already summed
+            # within each category above) — not one per raw Oracle trade row, or a
+            # symbol with several same-category lots would get split into duplicate
+            # fractional rows instead of one full-value row.
             total_qty = grp['my_buy_qty'].sum()
             if total_qty:
                 oracle_by_symbol[sym] = [
@@ -153,8 +158,7 @@ def live_category_breakdown(open_trades_df):
                     for _, row in grp.iterrows()
                 ]
 
-    cat_totals = {}
-    unmapped = []
+    rows = []
     for h in holdings:
         sym = (h.get('tradingsymbol') or '').upper()
         qty = float(h.get('quantity') or 0)
@@ -166,25 +170,67 @@ def live_category_breakdown(open_trades_df):
 
         shares = oracle_by_symbol.get(sym)
         if not shares:
-            unmapped.append({
-                'symbol': sym, 'quantity': qty, 'average_price': avg,
-                'last_price': ltp, 'invested': invested,
-                'current_value': current, 'pnl': pnl,
-            })
+            rows.append({'symbol': sym, 'category_name': None, 'quantity': qty,
+                          'average_price': avg, 'last_price': ltp,
+                          'invested': invested, 'current_value': current, 'pnl': pnl})
             continue
         for cat_name, weight in shares:
-            c = cat_totals.setdefault(cat_name, {'invested': 0.0, 'current_value': 0.0, 'pnl': 0.0})
-            c['invested'] += invested * weight
-            c['current_value'] += current * weight
-            c['pnl'] += pnl * weight
+            rows.append({'symbol': sym, 'category_name': cat_name, 'quantity': qty,
+                         'average_price': avg, 'last_price': ltp,
+                         'invested': invested * weight, 'current_value': current * weight,
+                         'pnl': pnl * weight})
+    return pd.DataFrame(rows, columns=cols)
 
-    category_df = pd.DataFrame(
-        [{'category_name': k, **v} for k, v in cat_totals.items()]
-    ).sort_values('invested', ascending=False) if cat_totals else pd.DataFrame(
-        columns=['category_name', 'invested', 'current_value', 'pnl'])
-    unmapped_df = pd.DataFrame(unmapped) if unmapped else pd.DataFrame(
-        columns=['symbol', 'quantity', 'average_price', 'last_price', 'invested', 'current_value', 'pnl'])
+
+def live_category_breakdown(open_trades_df):
+    """Per-category live invested/current_value/pnl, plus the unmapped
+    holdings (Kite holdings with no matching open Oracle trade) — the
+    actionable reconciliation list for the Oracle/Kite gap.
+
+    Returns (category_df, unmapped_df).
+    """
+    tagged = tag_holdings_with_category(open_trades_df)
+    empty_cat = pd.DataFrame(columns=['category_name', 'invested', 'current_value', 'pnl'])
+    if tagged.empty:
+        return empty_cat, pd.DataFrame()
+
+    mapped = tagged[tagged['category_name'].notna()]
+    unmapped_df = tagged[tagged['category_name'].isna()].drop(columns=['category_name']).reset_index(drop=True)
+    if mapped.empty:
+        return empty_cat, unmapped_df
+    category_df = mapped.groupby('category_name').agg(
+        invested=('invested', 'sum'), current_value=('current_value', 'sum'), pnl=('pnl', 'sum')
+    ).reset_index().sort_values('invested', ascending=False)
     return category_df, unmapped_df
+
+
+def open_orders_count():
+    """Orders currently OPEN at the broker — triggered GTT sells and pending
+    buy orders not yet filled."""
+    return sum(1 for o in get_orders() if str(o.get('status', '')).upper() == 'OPEN')
+
+
+def flatten_gtts(gtts=None):
+    """Flatten Kite's nested GTT trigger objects (condition/orders) into flat
+    rows suitable for a table."""
+    gtts = gtts if gtts is not None else get_gtts()
+    rows = []
+    for g in gtts:
+        cond = g.get('condition') or {}
+        orders = g.get('orders') or [{}]
+        o = orders[0] if orders else {}
+        rows.append({
+            'id': g.get('id'),
+            'symbol': cond.get('tradingsymbol'),
+            'status': g.get('status'),
+            'trigger_price': (cond.get('trigger_values') or [None])[0],
+            'last_price': cond.get('last_price'),
+            'quantity': o.get('quantity'),
+            'sell_price': o.get('price'),
+            'created_at': g.get('created_at'),
+            'expires_at': g.get('expires_at'),
+        })
+    return rows
 
 
 if __name__ == '__main__':
