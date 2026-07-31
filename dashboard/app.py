@@ -124,12 +124,6 @@ def page_overview():
 
     open_trades_df = db.trades(status='Open')
 
-    def _drill(nav_page, **filters):
-        st.session_state['nav_page'] = nav_page
-        for k, v in filters.items():
-            st.session_state[k] = v
-        st.rerun()
-
     try:
         hs = kite_data.holdings_summary()
         gs = kite_data.gtt_summary()
@@ -147,19 +141,13 @@ def page_overview():
         k5, k6, k7 = st.columns(3)
         with k5:
             st.markdown(theme.kpi_card("Active GTTs", gs['active'], tone="accent"), unsafe_allow_html=True)
-            if st.button("View →", key="drill_active_gtt"):
-                _drill("Orders", orders_view="GTT Triggers", gtt_status_filter="active")
         with k6:
             st.markdown(theme.kpi_card("Open Orders", open_orders, tone="accent"), unsafe_allow_html=True)
             st.caption("Triggered GTTs + pending buy orders")
-            if st.button("View →", key="drill_open_orders"):
-                _drill("Orders", orders_view="Orders", orders_status_filter="OPEN")
         with k7:
             order_line = " · ".join(f"{k}: {v}" for k, v in os_['by_status'].items()) or "none"
             st.markdown(theme.kpi_card("Today's Orders", os_['total']), unsafe_allow_html=True)
             st.caption(order_line)
-            if st.button("View →", key="drill_todays_orders"):
-                _drill("Orders", orders_view="Orders", orders_status_filter="All")
 
         tagged = kite_data.tag_holdings_with_category(open_trades_df)
         with st.expander(f"Holdings detail ({hs['count']})"):
@@ -245,12 +233,25 @@ def page_overview():
         st.info("No category data found.")
         return
 
+    realized_by_cat = db.category_pnl_breakdown_fy()
+    realized_map = dict(zip(realized_by_cat['category_name'], realized_by_cat['realized_pnl'])) \
+        if not realized_by_cat.empty else {}
+    try:
+        unrealized_by_cat = kite_data.unrealized_pnl_by_category(open_trades_df)
+        unrealized_map = dict(zip(unrealized_by_cat['category_name'], unrealized_by_cat['unrealized_pnl'])) \
+            if not unrealized_by_cat.empty else {}
+    except Exception:
+        unrealized_map = None
+
     for _, row in cat.iterrows():
         st.markdown(
             theme.category_bar(row['category_name'], float(row['category_budget']),
                                float(row['invested']), float(row['available'])),
             unsafe_allow_html=True
         )
+        r_pnl = realized_map.get(row['category_name'], 0.0)
+        u_pnl = unrealized_map.get(row['category_name'], 0.0) if unrealized_map is not None else None
+        st.markdown(theme.category_pnl_row(r_pnl, u_pnl), unsafe_allow_html=True)
 
 
 def page_drilldown():
@@ -589,18 +590,7 @@ def main():
 
     st.sidebar.markdown("## Capital Ledger")
     st.sidebar.caption(f"Signed in as **{st.session_state.get('user')}**")
-    if 'nav_page' not in st.session_state:
-        st.session_state['nav_page'] = PAGES[0]
-    # Deliberately NOT keyed 'nav_page' — a widget's own key can't be
-    # reassigned after it's instantiated in the same run, which is exactly
-    # what the drill-down buttons on Overview need to do. 'nav_page' is a
-    # plain session_state value drill-down buttons set freely; this radio
-    # just reads it for its initial index and writes back on manual clicks.
-    page = st.sidebar.radio(
-        "Navigate", PAGES, label_visibility="collapsed",
-        index=PAGES.index(st.session_state['nav_page']), key='nav_radio',
-    )
-    st.session_state['nav_page'] = page
+    page = st.sidebar.radio("Navigate", PAGES, label_visibility="collapsed")
     if st.sidebar.button("Sign out"):
         st.session_state.clear()
         st.rerun()

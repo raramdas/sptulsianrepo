@@ -29,6 +29,7 @@ Type
                          look while still aligning digits in tables/KPIs.
 """
 import streamlit as st
+import pandas as pd
 
 BG        = "#FFFFFF"
 SURFACE   = "#F8FAFC"
@@ -288,6 +289,29 @@ def category_bar(name, budget, invested, available):
     """
 
 
+def category_pnl_row(realized_pnl, unrealized_pnl=None):
+    """Small Realized / Unrealized / Total P&L line rendered directly under
+    a category's budget bar (category_bar). unrealized_pnl=None means the
+    Kite snapshot couldn't be read — shown as '—' rather than a wrong 0."""
+    r_color = POSITIVE if realized_pnl >= 0 else NEGATIVE
+    if unrealized_pnl is None:
+        return f"""
+        <div class="cat-figures" style="margin: -0.5rem 0 1.1rem 0;">
+            Realized: <b style="color:{r_color};">₹{realized_pnl:,.0f}</b> · Unrealized: <b>—</b>
+        </div>
+        """
+    u_color = POSITIVE if unrealized_pnl >= 0 else NEGATIVE
+    total = realized_pnl + unrealized_pnl
+    t_color = POSITIVE if total >= 0 else NEGATIVE
+    return f"""
+    <div class="cat-figures" style="margin: -0.5rem 0 1.1rem 0;">
+        Realized: <b style="color:{r_color};">₹{realized_pnl:,.0f}</b> ·
+        Unrealized: <b style="color:{u_color};">₹{unrealized_pnl:,.0f}</b> ·
+        Total: <b style="color:{t_color};">₹{total:,.0f}</b>
+    </div>
+    """
+
+
 def pill(text, tone="muted"):
     return f'<span class="pill pill-{tone}">{text}</span>'
 
@@ -356,17 +380,18 @@ def render_table(df, money_cols=None, status_col=None, gain_col=None):
             if status_col and c == status_col:
                 status_val = str(val).lower()
                 css_class += f" status-{status_val}"
-            if gain_col and c == gain_col and val not in (None, ''):
+            blank = val is None or val == '' or pd.isna(val)
+            if gain_col and c == gain_col and not blank:
                 try:
                     css_class += " gain-pos" if float(val) >= 0 else " gain-neg"
                 except (ValueError, TypeError):
                     pass
-            if c in money_cols and val not in (None, ''):
+            if c in money_cols and not blank:
                 try:
                     val = f"₹{float(val):,.2f}"
                 except (ValueError, TypeError):
                     pass
-            cells.append(f'<td class="{css_class}">{val if val is not None else ""}</td>')
+            cells.append(f'<td class="{css_class}">{"" if blank else val}</td>')
         rows_html.append(f"<tr>{''.join(cells)}</tr>")
     return f"""
     <div class="ledger-table-wrap">

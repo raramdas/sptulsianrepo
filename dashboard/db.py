@@ -274,6 +274,27 @@ def realized_pnl_fy():
     return {'total_realized': float(fy_df['my_gain_loss'].sum()), 'trade_count': len(fy_df), 'fy_label': label}
 
 
+def category_pnl_breakdown_fy():
+    """Realized P&L for the current fiscal year, grouped by category — the
+    category-level counterpart to realized_pnl_fy(), for Budget Tracking's
+    per-category breakdown."""
+    fy_start, fy_end = _current_fy_range()
+    df = realized_performance()
+    empty = pd.DataFrame(columns=['category_name', 'realized_pnl', 'trade_count'])
+    if df.empty:
+        return empty
+    df = df.copy()
+    df['my_gain_loss'] = pd.to_numeric(df['my_gain_loss'], errors='coerce').fillna(0)
+    sell_date = pd.to_datetime(df['my_sell_date'], errors='coerce')
+    mask = (sell_date >= pd.Timestamp(fy_start)) & (sell_date <= pd.Timestamp(fy_end))
+    df = df[mask]
+    if df.empty:
+        return empty
+    return df.groupby('category_name').agg(
+        realized_pnl=('my_gain_loss', 'sum'), trade_count=('trade_id', 'count')
+    ).reset_index().sort_values('realized_pnl', ascending=False)
+
+
 def performance_by_category():
     """Realized P&L, trade count, win rate, and avg holding period — grouped
     by category. Centerpiece of the Performance page, which is deliberately

@@ -222,31 +222,48 @@ def tag_holdings_with_category(open_trades_df):
     return pd.DataFrame(rows, columns=cols)
 
 
-def unrealized_pnl_for_oracle_trades(open_trades_df):
-    """Unrealized P&L for Oracle's own recorded Open trades only — priced
-    against the last-synced Kite last_price (matched by symbol). Deliberately
-    NOT the full holdings-reconciliation view (that's what
-    tag_holdings_with_category is for) — this stays scoped to exactly what
-    Oracle's Budget Tracking already claims is open, just marked to market
-    price instead of buy price.
+def unrealized_pnl_by_category(open_trades_df):
+    """Unrealized P&L for Oracle's own recorded Open trades, grouped by
+    category — priced against the last-synced Kite last_price (matched by
+    symbol). Deliberately NOT the full holdings-reconciliation view (that's
+    what tag_holdings_with_category is for) — this stays scoped to exactly
+    what Oracle's Budget Tracking already claims is open per category, just
+    marked to market price instead of buy price.
 
-    Returns (total_pnl, unpriced_count) — unpriced_count is how many open
-    trades had no matching synced quote (e.g. sold outside Oracle, delisted,
-    symbol renamed, or nothing synced yet) and were excluded from the total.
+    Returns a DataFrame: category_name, unrealized_pnl, unpriced_count
+    (unpriced_count = open trades in that category with no matching synced
+    quote — sold outside Oracle, delisted, symbol renamed, or nothing
+    synced yet).
     """
+    cols = ['category_name', 'unrealized_pnl', 'unpriced_count']
     if open_trades_df is None or open_trades_df.empty:
-        return 0.0, 0
+        return pd.DataFrame(columns=cols)
     price_map = {(h.get('tradingsymbol') or '').upper(): float(h.get('last_price') or 0)
                  for h in get_holdings()}
-    total = 0.0
-    unpriced = 0
-    for _, r in open_trades_df.iterrows():
-        ltp = price_map.get((r['symbol'] or '').upper())
-        if ltp:
-            total += (ltp - float(r['my_buy_price'])) * float(r['my_buy_qty'])
-        else:
-            unpriced += 1
-    return total, unpriced
+    rows = []
+    for cat_name, grp in open_trades_df.groupby('category_name'):
+        total = 0.0
+        unpriced = 0
+        for _, r in grp.iterrows():
+            ltp = price_map.get((r['symbol'] or '').upper())
+            if ltp:
+                total += (ltp - float(r['my_buy_price'])) * float(r['my_buy_qty'])
+            else:
+                unpriced += 1
+        rows.append({'category_name': cat_name, 'unrealized_pnl': total, 'unpriced_count': unpriced})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def unrealized_pnl_for_oracle_trades(open_trades_df):
+    """Portfolio-level total — sum of unrealized_pnl_by_category(), so the
+    two views can never drift apart.
+
+    Returns (total_pnl, unpriced_count).
+    """
+    by_cat = unrealized_pnl_by_category(open_trades_df)
+    if by_cat.empty:
+        return 0.0, 0
+    return float(by_cat['unrealized_pnl'].sum()), int(by_cat['unpriced_count'].sum())
 
 
 def open_orders_count():
