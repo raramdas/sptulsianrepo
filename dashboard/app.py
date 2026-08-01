@@ -104,23 +104,30 @@ def page_overview():
     st.title("Portfolio Overview")
 
     st.markdown("### Live Broker Snapshot (Kite)")
-    synced_at = kite_data.last_synced_at()
-    if synced_at:
-        st.caption(f"From your Zerodha account as of last sync: **{synced_at.strftime('%Y-%m-%d %H:%M:%S')}**. "
-                   "This isn't live — click Sync to refresh. The budget tracking below is Capital "
-                   "Ledger's own bookkeeping in Oracle and can drift from this snapshot.")
+    sync_status = kite_data.sync_status()
+    if sync_status:
+        lines = [f"**{row['account_label']}**: {row['synced_at'].strftime('%Y-%m-%d %H:%M:%S')} "
+                 f"({row['holdings_count']} holdings, {row['gtt_count']} GTTs, {row['order_count']} orders)"
+                 for row in sync_status]
+        st.caption("Last synced — " + " · ".join(lines) + ". Not live — click Sync to refresh. The "
+                   "budget tracking below is Capital Ledger's own bookkeeping in Oracle and can drift "
+                   "from this snapshot.")
     else:
-        st.caption("Not synced yet — click 'Sync Kite Data' below to pull your holdings, GTTs, "
-                   "and order book from Zerodha.")
+        st.caption("Not synced yet — click 'Sync Kite Data' below to pull holdings, GTTs, "
+                   "and the order book from every configured Zerodha account.")
 
     if st.button("Sync Kite Data"):
-        with st.spinner("Logging into Kite and syncing…"):
-            try:
-                result = kite_data.sync_now()
-                st.success(f"Synced: {result['holdings']} holdings, {result['gtts']} GTTs, "
-                           f"{result['orders']} orders.")
-            except Exception as e:
-                st.error(f"Sync failed: {e}")
+        with st.spinner("Logging into Kite and syncing every configured account…"):
+            results = kite_data.sync_now()
+            ok = {k: v for k, v in results.items() if 'error' not in v}
+            failed = {k: v for k, v in results.items() if 'error' in v}
+            if ok:
+                st.success(" · ".join(
+                    f"{label}: {r['holdings']} holdings, {r['gtts']} GTTs, {r['orders']} orders"
+                    for label, r in ok.items()
+                ))
+            for label, r in failed.items():
+                st.error(f"{label} sync failed: {r['error']}")
 
     open_trades_df = db.trades(status='Open')
 
@@ -151,11 +158,11 @@ def page_overview():
 
         tagged = kite_data.tag_holdings_with_category(open_trades_df)
         with st.expander(f"Holdings detail ({hs['count']})"):
-            display_cols = ['symbol', 'quantity', 'average_price', 'last_price', 'pnl']
+            display_cols = ['symbol', 'account_label', 'quantity', 'average_price', 'last_price', 'pnl']
             money_cols = ['average_cost', 'last_price', 'pnl']
 
             def _render_holdings(df):
-                d = df[display_cols].rename(columns={'average_price': 'average_cost'}).copy()
+                d = df[display_cols].rename(columns={'average_price': 'average_cost', 'account_label': 'account'}).copy()
                 d['quantity'] = d['quantity'].astype(int)
                 st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
 
@@ -523,10 +530,11 @@ def page_settings():
 
 def page_orders():
     st.title("Orders")
-    synced_at = kite_data.last_synced_at()
-    if synced_at:
-        st.caption(f"Order book and GTT triggers as of last sync: **{synced_at.strftime('%Y-%m-%d %H:%M:%S')}** "
-                   "— not live. Use 'Sync Kite Data' on Overview to refresh.")
+    sync_status = kite_data.sync_status()
+    if sync_status:
+        lines = [f"**{row['account_label']}**: {row['synced_at'].strftime('%Y-%m-%d %H:%M:%S')}" for row in sync_status]
+        st.caption("Order book and GTT triggers as of last sync — " + " · ".join(lines) +
+                   ". Not live — use 'Sync Kite Data' on Overview to refresh.")
     else:
         st.caption("Not synced yet — go to Overview and click 'Sync Kite Data'.")
 
@@ -548,9 +556,9 @@ def page_orders():
                 fdf = odf if status == 'All' else odf[odf['status'] == status]
                 st.caption(f"{len(fdf)} order(s)")
                 cols = [c for c in ['order_timestamp', 'tradingsymbol', 'transaction_type', 'order_type',
-                                    'quantity', 'filled_quantity', 'price', 'average_price', 'status']
+                                    'quantity', 'filled_quantity', 'price', 'average_price', 'status', 'account_label']
                         if c in fdf.columns]
-                display = fdf[cols].rename(columns={'tradingsymbol': 'symbol'}).copy()
+                display = fdf[cols].rename(columns={'tradingsymbol': 'symbol', 'account_label': 'account'}).copy()
                 if 'order_timestamp' in display.columns:
                     display['order_timestamp'] = display['order_timestamp'].astype(str).str.split(' ').str[0]
                 st.markdown(theme.render_table(display, money_cols=['price', 'average_price'],
@@ -570,6 +578,7 @@ def page_orders():
                 for date_col in ('created_at', 'expires_at'):
                     if date_col in fdf.columns:
                         fdf[date_col] = fdf[date_col].astype(str).str.split(' ').str[0]
+                fdf = fdf.rename(columns={'account_label': 'account'})
                 st.markdown(theme.render_table(fdf, money_cols=['trigger_price', 'last_price', 'sell_price'],
                                                status_col='status'), unsafe_allow_html=True)
     except Exception as e:

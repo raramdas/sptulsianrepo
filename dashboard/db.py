@@ -328,10 +328,12 @@ def performance_by_category():
 # Kite call, triggered manually by the 'Sync Kite Data' button on Overview.
 # It writes here; everything else reads the last-synced snapshot back.
 
-def save_kite_snapshot(holdings, gtts, orders):
-    """Replace the Kite snapshot tables with a fresh sync. Full
-    delete+reinsert each time — this is a point-in-time snapshot, not a
-    history, so there's no reconciliation logic needed on write."""
+def save_kite_snapshot(account_label, holdings, gtts, orders):
+    """Replace ONE account's rows in the Kite snapshot tables with a fresh
+    sync — delete+reinsert scoped to account_label only, so syncing one
+    account never wipes another account's last-synced data. Multiple
+    accounts can be synced independently (e.g. NEW day-to-day, OLD only
+    until its remaining positions are wound down)."""
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -340,47 +342,58 @@ def save_kite_snapshot(holdings, gtts, orders):
         # datetime.now(IST) then treated as naive for storage/display).
         now = datetime.datetime.now(IST).replace(tzinfo=None)
 
-        cur.execute("DELETE FROM kite_holdings_snapshot")
+        cur.execute("DELETE FROM kite_holdings_snapshot WHERE account_label = :label", {'label': account_label})
         if holdings:
             cur.executemany("""
                 INSERT INTO kite_holdings_snapshot
-                    (tradingsymbol, quantity, average_price, last_price, pnl, synced_at)
-                VALUES (:1, :2, :3, :4, :5, :6)
+                    (tradingsymbol, quantity, average_price, last_price, pnl, synced_at, account_label)
+                VALUES (:1, :2, :3, :4, :5, :6, :7)
             """, [
                 (h.get('tradingsymbol'), h.get('quantity'), h.get('average_price'),
-                 h.get('last_price'), h.get('pnl'), now)
+                 h.get('last_price'), h.get('pnl'), now, account_label)
                 for h in holdings
             ])
 
-        cur.execute("DELETE FROM kite_gtt_snapshot")
+        cur.execute("DELETE FROM kite_gtt_snapshot WHERE account_label = :label", {'label': account_label})
         if gtts:
             cur.executemany("""
                 INSERT INTO kite_gtt_snapshot
                     (gtt_id, symbol, status, trigger_price, last_price, quantity,
-                     sell_price, created_at, expires_at, synced_at)
-                VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10)
+                     sell_price, created_at, expires_at, synced_at, account_label)
+                VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11)
             """, [
                 (str(g.get('id')) if g.get('id') is not None else None, g.get('symbol'),
                  g.get('status'), g.get('trigger_price'), g.get('last_price'),
                  g.get('quantity'), g.get('sell_price'), g.get('created_at'),
-                 g.get('expires_at'), now)
+                 g.get('expires_at'), now, account_label)
                 for g in gtts
             ])
 
-        cur.execute("DELETE FROM kite_orders_snapshot")
+        cur.execute("DELETE FROM kite_orders_snapshot WHERE account_label = :label", {'label': account_label})
         if orders:
             cur.executemany("""
                 INSERT INTO kite_orders_snapshot
                     (order_id, order_timestamp, tradingsymbol, transaction_type, order_type,
-                     quantity, filled_quantity, price, average_price, status, synced_at)
-                VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11)
+                     quantity, filled_quantity, price, average_price, status, synced_at, account_label)
+                VALUES (:1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12)
             """, [
                 (str(o.get('order_id')) if o.get('order_id') is not None else None,
                  o.get('order_timestamp'), o.get('tradingsymbol'), o.get('transaction_type'),
                  o.get('order_type'), o.get('quantity'), o.get('filled_quantity'),
-                 o.get('price'), o.get('average_price'), o.get('status'), now)
+                 o.get('price'), o.get('average_price'), o.get('status'), now, account_label)
                 for o in orders
             ])
+
+        cur.execute("""
+            MERGE INTO kite_sync_log t
+            USING (SELECT :label AS account_label FROM dual) s
+            ON (t.account_label = s.account_label)
+            WHEN MATCHED THEN UPDATE SET
+                synced_at = :synced_at, holdings_count = :hc, gtt_count = :gc, order_count = :oc
+            WHEN NOT MATCHED THEN INSERT (account_label, synced_at, holdings_count, gtt_count, order_count)
+                VALUES (:label, :synced_at, :hc, :gc, :oc)
+        """, {'label': account_label, 'synced_at': now,
+              'hc': len(holdings), 'gc': len(gtts), 'oc': len(orders)})
 
         conn.commit()
         return now
@@ -389,36 +402,52 @@ def save_kite_snapshot(holdings, gtts, orders):
 
 
 def get_kite_holdings():
-    """Last-synced Kite holdings snapshot, as a list of dicts (matches the
-    shape the old live-fetch code returned, so downstream code in
-    kite_data.py didn't need to change)."""
-    df = _df("SELECT tradingsymbol, quantity, average_price, last_price, pnl FROM kite_holdings_snapshot")
+    """Last-synced Kite holdings snapshot across ALL synced accounts, as a
+    list of dicts (matches the shape the old live-fetch code returned, so
+    downstream code in kite_data.py didn't need to change beyond gaining
+    an extra 'account_label' key on each row)."""
+    df = _df("SELECT tradingsymbol, quantity, average_price, last_price, pnl, account_label FROM kite_holdings_snapshot")
     return df.to_dict('records')
 
 
 def get_kite_gtts():
-    """Last-synced, already-flattened GTT snapshot."""
+    """Last-synced, already-flattened GTT snapshot across ALL synced accounts."""
     df = _df("""
         SELECT gtt_id AS id, symbol, status, trigger_price, last_price,
-               quantity, sell_price, created_at, expires_at
+               quantity, sell_price, created_at, expires_at, account_label
         FROM kite_gtt_snapshot
     """)
     return df.to_dict('records')
 
 
 def get_kite_orders():
-    """Last-synced order book snapshot."""
+    """Last-synced order book snapshot across ALL synced accounts."""
     df = _df("""
         SELECT order_id, order_timestamp, tradingsymbol, transaction_type,
-               order_type, quantity, filled_quantity, price, average_price, status
+               order_type, quantity, filled_quantity, price, average_price, status, account_label
         FROM kite_orders_snapshot
     """)
     return df.to_dict('records')
 
 
+def get_kite_sync_status():
+    """Per-account sync status — [{account_label, synced_at, holdings_count,
+    gtt_count, order_count}, ...], newest first. Backed by kite_sync_log
+    rather than derived from the snapshot tables, so an account with zero
+    current holdings/GTTs/orders (e.g. a brand-new account) still shows an
+    accurate last-synced time instead of NULL."""
+    df = _df("""
+        SELECT account_label, synced_at, holdings_count, gtt_count, order_count
+        FROM kite_sync_log ORDER BY synced_at DESC
+    """)
+    return df.to_dict('records')
+
+
 def get_kite_last_synced():
-    """Timestamp of the last successful Kite sync, or None if never synced."""
-    df = _df("SELECT MAX(synced_at) AS synced_at FROM kite_holdings_snapshot")
+    """Most recent sync time across all accounts, or None if never synced.
+    Kept for simple callers that just want one timestamp — use
+    get_kite_sync_status() for the per-account breakdown."""
+    df = _df("SELECT MAX(synced_at) AS synced_at FROM kite_sync_log")
     if df.empty or pd.isna(df.iloc[0]['synced_at']):
         return None
     return df.iloc[0]['synced_at']

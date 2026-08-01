@@ -28,9 +28,25 @@ load_dotenv('/home/ubuntu/.env')
 
 OMS_BASE = 'https://kite.zerodha.com/oms'
 
-ZERODHA_USER_ID  = os.environ.get('ZERODHA_USER_ID')
-ZERODHA_PASSWORD = os.environ.get('ZERODHA_PASSWORD')
-TOTP_SECRET      = os.environ.get('ZERODHA_TOTP_SECRET')
+# Accounts to sync. NEW is the dedicated automation account and is always
+# expected. OLD is the personal/pre-cutover account — kept here only until
+# its remaining GTTs/holdings from before the cutover are wound down; once
+# there's nothing left to track, remove the ZERODHA_OLD_* lines from .env
+# and it drops out of _ACCOUNTS automatically (no code change needed).
+def _account_creds(prefix):
+    user_id  = os.environ.get(f'ZERODHA_{prefix}USER_ID' if prefix else 'ZERODHA_USER_ID')
+    password = os.environ.get(f'ZERODHA_{prefix}PASSWORD' if prefix else 'ZERODHA_PASSWORD')
+    totp     = os.environ.get(f'ZERODHA_{prefix}TOTP_SECRET' if prefix else 'ZERODHA_TOTP_SECRET')
+    if user_id and password and totp:
+        return {'user_id': user_id, 'password': password, 'totp_secret': totp}
+    return None
+
+
+_ACCOUNTS = {}
+for _label, _prefix in [('NEW', ''), ('OLD', 'OLD_')]:
+    _creds = _account_creds(_prefix)
+    if _creds:
+        _ACCOUNTS[_label] = _creds
 
 
 def kite_headers(enctoken):
@@ -38,24 +54,25 @@ def kite_headers(enctoken):
 
 
 @st.cache_resource(ttl=4 * 3600)
-def _get_enctoken():
-    """Log into Kite via TOTP. Cached process-wide for 4 hours — mostly
-    irrelevant now that syncing is manual/infrequent, but still avoids a
-    double-login if Sync is clicked twice in quick succession."""
-    if not (ZERODHA_USER_ID and ZERODHA_PASSWORD and TOTP_SECRET):
-        raise RuntimeError("Kite credentials not found in /home/ubuntu/.env "
-                            "(ZERODHA_USER_ID / ZERODHA_PASSWORD / ZERODHA_TOTP_SECRET)")
+def _get_enctoken(account_label):
+    """Log into Kite via TOTP for the given account. Cached process-wide per
+    account for 4 hours — mostly irrelevant now that syncing is
+    manual/infrequent, but still avoids a double-login if Sync is clicked
+    twice in quick succession."""
+    creds = _ACCOUNTS.get(account_label)
+    if not creds:
+        raise RuntimeError(f"No Kite credentials configured for account '{account_label}' in /home/ubuntu/.env")
     session = requests.Session()
     r = session.post('https://kite.zerodha.com/api/login', data={
-        'user_id': ZERODHA_USER_ID, 'password': ZERODHA_PASSWORD
+        'user_id': creds['user_id'], 'password': creds['password']
     }, timeout=15)
     data = r.json()
     if data.get('status') != 'success':
         raise RuntimeError(f"Kite login failed: {data.get('message')}")
     request_id = data['data']['request_id']
-    totp_code = pyotp.TOTP(TOTP_SECRET).now()
+    totp_code = pyotp.TOTP(creds['totp_secret']).now()
     r2 = session.post('https://kite.zerodha.com/api/twofa', data={
-        'user_id': ZERODHA_USER_ID, 'request_id': request_id,
+        'user_id': creds['user_id'], 'request_id': request_id,
         'twofa_value': totp_code, 'skip_session': ''
     }, timeout=15)
     data2 = r2.json()
@@ -67,8 +84,8 @@ def _get_enctoken():
     return enctoken
 
 
-def _get(path):
-    enctoken = _get_enctoken()
+def _get(path, account_label):
+    enctoken = _get_enctoken(account_label)
     r = requests.get(f'{OMS_BASE}{path}', headers=kite_headers(enctoken), timeout=15)
     data = r.json()
     if data.get('status') != 'success':
@@ -101,19 +118,34 @@ def _flatten_raw_gtts(raw_gtts):
 
 def sync_now():
     """The ONLY code path in this module that calls Kite's live API.
-    Fetches holdings/GTTs/orders and persists them to Oracle; everything
-    else here reads that snapshot back. Manually triggered only (the 'Sync
-    Kite Data' button on Overview) — no scheduled polling."""
-    holdings = _get('/portfolio/holdings')
-    raw_gtts = _get('/gtt/triggers')
-    orders = _get('/orders')
-    flat_gtts = _flatten_raw_gtts(raw_gtts)
-    synced_at = db.save_kite_snapshot(holdings, flat_gtts, orders)
-    return {'holdings': len(holdings), 'gtts': len(flat_gtts), 'orders': len(orders), 'synced_at': synced_at}
+    Logs into every configured account (NEW always; OLD too, until its
+    remaining positions are wound down and removed from .env) and syncs
+    each independently — one account's login failure doesn't block the
+    other's sync. Manually triggered only (the 'Sync Kite Data' button on
+    Overview) — no scheduled polling."""
+    results = {}
+    for account_label in _ACCOUNTS:
+        try:
+            holdings = _get('/portfolio/holdings', account_label)
+            raw_gtts = _get('/gtt/triggers', account_label)
+            orders = _get('/orders', account_label)
+            flat_gtts = _flatten_raw_gtts(raw_gtts)
+            synced_at = db.save_kite_snapshot(account_label, holdings, flat_gtts, orders)
+            results[account_label] = {'holdings': len(holdings), 'gtts': len(flat_gtts),
+                                       'orders': len(orders), 'synced_at': synced_at}
+        except Exception as e:
+            results[account_label] = {'error': str(e)}
+    return results
+
+
+def sync_status():
+    """Per-account last-synced info: [{account_label, synced_at,
+    holdings_count, gtt_count, order_count}, ...]."""
+    return db.get_kite_sync_status()
 
 
 def last_synced_at():
-    """When the Oracle snapshot was last refreshed, or None if never synced."""
+    """Most recent sync time across all accounts, or None if never synced."""
     return db.get_kite_last_synced()
 
 
@@ -177,7 +209,7 @@ def tag_holdings_with_category(open_trades_df):
     keeping them in one place so the two views can't drift apart.
     """
     holdings = get_holdings()
-    cols = ['symbol', 'category_name', 'quantity', 'average_price', 'last_price', 'invested', 'current_value', 'pnl']
+    cols = ['symbol', 'category_name', 'quantity', 'average_price', 'last_price', 'invested', 'current_value', 'pnl', 'account_label']
     if not holdings:
         return pd.DataFrame(columns=cols)
 
@@ -204,6 +236,7 @@ def tag_holdings_with_category(open_trades_df):
         qty = float(h.get('quantity') or 0)
         avg = float(h.get('average_price') or 0)
         ltp = float(h.get('last_price') or 0)
+        acct = h.get('account_label')
         invested = qty * avg
         current = qty * ltp
         pnl = current - invested
@@ -212,13 +245,14 @@ def tag_holdings_with_category(open_trades_df):
         if not shares:
             rows.append({'symbol': sym, 'category_name': None, 'quantity': qty,
                           'average_price': avg, 'last_price': ltp,
-                          'invested': invested, 'current_value': current, 'pnl': pnl})
+                          'invested': invested, 'current_value': current, 'pnl': pnl,
+                          'account_label': acct})
             continue
         for cat_name, weight in shares:
             rows.append({'symbol': sym, 'category_name': cat_name, 'quantity': qty,
                          'average_price': avg, 'last_price': ltp,
                          'invested': invested * weight, 'current_value': current * weight,
-                         'pnl': pnl * weight})
+                         'pnl': pnl * weight, 'account_label': acct})
     return pd.DataFrame(rows, columns=cols)
 
 

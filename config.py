@@ -28,9 +28,21 @@ OMS_BASE = 'https://kite.zerodha.com/oms'
 # ── Credentials (from .env) ──────────────────────────────────────
 KITE_API_KEY       = os.environ['KITE_API_KEY']
 KITE_API_SECRET    = os.environ['KITE_API_SECRET']
-ZERODHA_USER_ID    = os.environ['ZERODHA_USER_ID']
-ZERODHA_PASSWORD   = os.environ['ZERODHA_PASSWORD']
-TOTP_SECRET        = os.environ['ZERODHA_TOTP_SECRET']
+
+# KITE_ACCOUNT lets a one-off manual run target the OLD (personal, pre-cutover)
+# Zerodha account instead of the NEW (dedicated automation) account, without
+# touching .env or affecting the cron job's default. Cron never sets this, so
+# it always resolves to the NEW account. Usage: KITE_ACCOUNT=OLD python3 main_gtt_oracle.py
+KITE_ACCOUNT = os.environ.get('KITE_ACCOUNT', 'NEW').upper()
+if KITE_ACCOUNT == 'OLD':
+    ZERODHA_USER_ID  = os.environ['ZERODHA_OLD_USER_ID']
+    ZERODHA_PASSWORD = os.environ['ZERODHA_OLD_PASSWORD']
+    TOTP_SECRET      = os.environ['ZERODHA_OLD_TOTP_SECRET']
+else:
+    ZERODHA_USER_ID  = os.environ['ZERODHA_USER_ID']
+    ZERODHA_PASSWORD = os.environ['ZERODHA_PASSWORD']
+    TOTP_SECRET      = os.environ['ZERODHA_TOTP_SECRET']
+
 GMAIL_USER         = os.environ['GMAIL_USER']
 GMAIL_APP_PASSWORD = os.environ['GMAIL_APP_PASSWORD']
 GSHEET_CREDS_FILE  = os.environ.get('GSHEET_CREDS_JSON', '/home/ubuntu/gsheet_creds.json')
