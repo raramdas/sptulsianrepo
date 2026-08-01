@@ -510,11 +510,21 @@ def close_trade(trade_id, sell_price, sell_date):
 
 
 def open_trades_for_targets():
-    """Open trades, most recent first — for the Set Targets page."""
+    """Open trades from the 2 most recent recommendation days — for the Set
+    Targets page. Deliberately the last 2 DISTINCT buy_date values among open
+    trades, not the last 2 calendar days — that naturally lines up with
+    market open days (skips weekends/holidays with no recommendations)
+    instead of e.g. showing Friday+Saturday on a Monday morning."""
     return _df("""
         SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
                my_buy_price, my_buy_qty, invested_amount, target_price, timeframe, have_interest
-        FROM trades WHERE status = 'Open'
+        FROM trades
+        WHERE status = 'Open'
+          AND buy_date IN (
+              SELECT buy_date FROM (
+                  SELECT DISTINCT buy_date FROM trades WHERE status = 'Open' ORDER BY buy_date DESC
+              ) WHERE ROWNUM <= 2
+          )
         ORDER BY buy_date DESC, trade_id DESC
     """)
 
