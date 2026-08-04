@@ -23,6 +23,7 @@ reused here rather than duplicated.
 """
 import math
 import os
+import re
 import requests
 import pyotp
 import pandas as pd
@@ -322,17 +323,39 @@ def open_orders_count():
 def get_quote(symbol, account_label='NEW'):
     """Live last-traded price for a symbol. Only used by the retry-buy
     preview, to price a manually-corrected symbol before anyone commits to
-    buying it."""
-    enctoken = _get_enctoken(account_label)
-    r = requests.get(f'{OMS_BASE}/quote', params={'i': f'NSE:{symbol}'},
-                      headers=kite_headers(enctoken), timeout=15)
-    data = r.json()
-    if data.get('status') != 'success':
-        raise RuntimeError(f"Kite quote failed: {data.get('message')}")
-    q = data.get('data', {}).get(f'NSE:{symbol}')
-    if not q or not q.get('last_price'):
-        raise RuntimeError(f"No live quote for NSE:{symbol} — double check the symbol is correct")
-    return float(q['last_price'])
+    buying it. Kite's OMS /quote endpoint 400s on this web session
+    regardless of symbol (same failure kite_client.py's get_market_price()
+    silently falls back from) — so this mirrors that same Kite-then-Google-
+    Finance fallback rather than surfacing a false "invalid symbol" error."""
+    try:
+        enctoken = _get_enctoken(account_label)
+        r = requests.get(f'{OMS_BASE}/quote', params={'i': f'NSE:{symbol}'},
+                          headers=kite_headers(enctoken), timeout=15)
+        data = r.json()
+        ltp = data.get('data', {}).get(f'NSE:{symbol}', {}).get('last_price')
+        if ltp:
+            return float(ltp)
+    except Exception:
+        pass
+
+    gf_url = f'https://www.google.com/finance/quote/{symbol}:NSE'
+    r = requests.get(gf_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+    for pattern in [
+        r'data-last-price="([\d.]+)"',
+        r'"price":"([\d.]+)"',
+        r'<div[^>]*class="[^"]*YMlKec[^"]*"[^>]*>([\d,]+(?:\.[\d]+)?)<',
+        r'([\d,]+\.\d+)\s*</div>',
+    ]:
+        match = re.search(pattern, r.text)
+        if match:
+            try:
+                price = float(match.group(1).replace(',', ''))
+                if price > 0:
+                    return price
+            except ValueError:
+                pass
+    raise RuntimeError(f"Could not get a live price for {symbol} from Kite or Google Finance — "
+                       f"double check the symbol is correct")
 
 
 def preview_retry_buy(trade_id, symbol):
