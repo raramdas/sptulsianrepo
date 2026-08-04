@@ -152,7 +152,7 @@ def all_recommendations():
     of whether a buy actually happened — this was already being captured,
     just never surfaced as its own view."""
     return _df("""
-        SELECT trade_id, buy_date, stock_name, recommended_price, target_price, status
+        SELECT trade_id, buy_date, stock_name, recommended_price, target_price, status, notes
         FROM trades
         ORDER BY buy_date DESC, trade_id DESC
     """)
@@ -527,6 +527,130 @@ def open_trades_for_targets():
           )
         ORDER BY buy_date DESC, trade_id DESC
     """)
+
+
+def needs_review_trades():
+    """Trades flagged NEEDS_REVIEW — the buy bot refused to guess a symbol
+    match rather than risk buying the wrong stock. Most recent first."""
+    return _df("""
+        SELECT trade_id, buy_date, category_name, stock_name, recommended_price, notes
+        FROM trades WHERE status = 'NEEDS_REVIEW'
+        ORDER BY buy_date DESC, trade_id DESC
+    """)
+
+
+def get_stock_cap_type(symbol):
+    """Look up Large/Mid/Small/Micro Cap classification from AMFI-derived
+    table. Mirrors budget_manager.py's get_stock_cap_type() — used by the
+    Needs Review retry-buy flow, which needs the same cap-type-aware budget
+    check the live bot uses."""
+    if not symbol:
+        return None
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT cap_type FROM stock_cap_classification WHERE symbol = :symbol",
+                    {'symbol': symbol.strip().upper()})
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def get_category_id(category_name):
+    """Active category_id for a category name. Mirrors budget_manager.py."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ca.category_id
+            FROM category_allocation ca
+            JOIN portfolio_budget pb ON pb.budget_id = ca.budget_id AND pb.is_active = 'Y'
+            WHERE ca.is_active = 'Y' AND UPPER(ca.category_name) = UPPER(:name)
+        """, {'name': category_name})
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def check_budget_available(category_name, cap_type, invest_amt):
+    """Category budget + stock-type-within-category budget check — exact
+    port of budget_manager.py's check_budget_available() so a manual retry
+    buy from the dashboard is governed by the identical rule the live bot
+    uses. Returns (True, category_id) if invest_amt fits in both, else
+    (False, category_id/None). Fails open (allows) only on a genuine DB
+    error, matching the live bot's behavior."""
+    conn = get_connection()
+    try:
+        category_id = get_category_id(category_name)
+        if not category_id:
+            return True, None
+
+        cur = conn.cursor()
+        cur.execute("SELECT available FROM category_budget_status WHERE category_name = :name",
+                    {'name': category_name})
+        row = cur.fetchone()
+        category_available = float(row[0]) if row else 0
+        if category_available < invest_amt:
+            return False, category_id
+
+        if cap_type:
+            cur.execute("""
+                SELECT stock_type_budget, invested FROM stock_type_budget_status
+                WHERE category_name = :name AND stock_type = :cap_type
+            """, {'name': category_name, 'cap_type': cap_type})
+            row = cur.fetchone()
+            if row:
+                stock_type_available = float(row[0]) - float(row[1])
+            else:
+                cur.execute("""
+                    SELECT CASE :cap_type
+                        WHEN 'Large Cap' THEN large_cap_pct
+                        WHEN 'Mid Cap'   THEN mid_cap_pct
+                        WHEN 'Small Cap' THEN small_cap_pct
+                        WHEN 'Micro Cap' THEN micro_cap_pct
+                    END
+                    FROM category_allocation WHERE category_id = :cid
+                """, {'cap_type': cap_type, 'cid': category_id})
+                pct_row = cur.fetchone()
+                pct = float(pct_row[0]) if pct_row and pct_row[0] else 0
+                cur.execute("SELECT total_budget FROM portfolio_budget WHERE is_active = 'Y'")
+                total_budget = float(cur.fetchone()[0])
+                stock_type_available = total_budget * pct / 100
+            if stock_type_available < invest_amt:
+                return False, category_id
+
+        return True, category_id
+    except Exception:
+        return True, get_category_id(category_name)
+    finally:
+        conn.close()
+
+
+def apply_retry_buy(trade_id, category_id, symbol, stock_type, order_type,
+                     buy_order_id, market_price, buy_price, qty, invested_amount):
+    """Turn a NEEDS_REVIEW row into a real Open trade after a successful
+    manual retry-buy — same fields main.py's insert_trade_to_oracle() would
+    have set on the original run, had the symbol resolved cleanly."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE trades SET
+                category_id = :category_id, symbol = :symbol, stock_type = :stock_type,
+                status = 'Open', my_buy_date = SYSDATE, order_type = :order_type,
+                buy_order_id = :buy_order_id, market_price_at_buy = :market_price,
+                my_buy_price = :buy_price, my_buy_qty = :qty, invested_amount = :invested_amount,
+                notes = NULL, updated_at = SYSTIMESTAMP
+            WHERE trade_id = :trade_id
+        """, {'category_id': category_id, 'symbol': symbol, 'stock_type': stock_type,
+              'order_type': order_type, 'buy_order_id': buy_order_id, 'market_price': market_price,
+              'buy_price': buy_price, 'qty': qty, 'invested_amount': invested_amount, 'trade_id': trade_id})
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 
 def update_trade_target(trade_id, target_price, have_interest, timeframe):

@@ -217,6 +217,7 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 .ledger-table td.status-open {{ color: {POSITIVE} !important; font-weight: 600; }}
 .ledger-table td.status-closed {{ color: {MUTED} !important; }}
 .ledger-table td.status-error, .ledger-table td.status-skipped {{ color: {NEGATIVE} !important; }}
+.ledger-table td.status-needs_review {{ color: {ACCENT} !important; font-weight: 600; }}
 .ledger-table td.gain-pos {{ color: {POSITIVE} !important; font-weight: 600; }}
 .ledger-table td.gain-neg {{ color: {NEGATIVE} !important; font-weight: 600; }}
 
@@ -366,10 +367,36 @@ def render_line_chart(df, x, y, title=None):
     return fig
 
 
-def render_table(df, money_cols=None, status_col=None, gain_col=None):
-    """Return HTML for a styled table from a DataFrame."""
+def friendly_status(status, notes):
+    """Turn a raw trade status + its notes into something readable at a
+    glance, instead of a bare 'ERROR' that needs a click into notes to
+    understand. The underlying status word still drives the color (via
+    status_class_col in render_table) — only the displayed text changes."""
+    s = (status or '').upper()
+    n = notes or ''
+    nl = n.lower()
+    if s == 'ERROR':
+        if 'cancelled' in nl:
+            return 'Cancelled — never filled'
+        if 'rejected' in nl:
+            return 'Rejected by broker'
+        return f'Error — {n}' if n else 'Error'
+    if s == 'SKIPPED':
+        return f'Skipped — {n}' if n else 'Skipped'
+    if s == 'NEEDS_REVIEW':
+        return 'Needs Review'
+    return status
+
+
+def render_table(df, money_cols=None, status_col=None, gain_col=None, status_class_col=None):
+    """Return HTML for a styled table from a DataFrame. status_class_col
+    (optional) lets the CSS color-class be derived from a different, raw
+    column than the one actually displayed in status_col — e.g. showing
+    'Cancelled — never filled' as text while still coloring it via the
+    underlying 'ERROR' status. That raw column is used for lookup only and
+    is not rendered as its own visible column."""
     money_cols = money_cols or []
-    cols = list(df.columns)
+    cols = [c for c in df.columns if c != status_class_col]
     header = "".join(f"<th>{c.replace('_', ' ').title()}</th>" for c in cols)
     rows_html = []
     for _, row in df.iterrows():
@@ -378,7 +405,8 @@ def render_table(df, money_cols=None, status_col=None, gain_col=None):
             val = row[c]
             css_class = "num" if c in money_cols else ""
             if status_col and c == status_col:
-                status_val = str(val).lower()
+                class_source = row[status_class_col] if status_class_col else val
+                status_val = str(class_source).lower()
                 css_class += f" status-{status_val}"
             blank = val is None or val == '' or pd.isna(val)
             if not blank and hasattr(val, 'strftime'):

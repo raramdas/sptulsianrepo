@@ -14,6 +14,7 @@ Pages:
   - Set Targets          set target price / timeframe / have-interest per trade
   - Trades Explorer      filterable, searchable, CSV export
   - Recommendations      every tip the bot has seen, bought or not
+  - Needs Review          symbols the bot wouldn't guess — correct + manual retry-buy
   - Orders               live Kite order book + GTT triggers, filterable
   - Classification       AMFI cap-type lookup
   - Settings & Edits     total budget, category %, manually close a trade
@@ -340,9 +341,13 @@ def _render_trades_table(tdf):
     if tdf.empty:
         st.info("No trades.")
         return
+    tdf = tdf.copy()
+    tdf['_status_raw'] = tdf['status']
+    tdf['status'] = tdf.apply(lambda r: theme.friendly_status(r['_status_raw'], r.get('notes')), axis=1)
     money_cols = ['my_buy_price', 'invested_amount', 'target_price', 'my_sell_price', 'my_gain_loss']
-    display_cols = [c for c in tdf.columns if c not in ('trade_id',)]
-    st.markdown(theme.render_table(tdf[display_cols], money_cols=money_cols, status_col='status', gain_col='my_gain_loss'),
+    display_cols = [c for c in tdf.columns if c not in ('trade_id', 'notes')]
+    st.markdown(theme.render_table(tdf[display_cols], money_cols=money_cols, status_col='status',
+                                   status_class_col='_status_raw', gain_col='my_gain_loss'),
                 unsafe_allow_html=True)
 
 
@@ -395,12 +400,80 @@ def page_recommendations():
         'recommended_price': 'Purchase Price', 'target_price': 'Target Price',
         'status': 'Status',
     })
+    display['_status_raw'] = df['status']
+    display['Status'] = df.apply(lambda r: theme.friendly_status(r['status'], r.get('notes')), axis=1)
     st.caption(f"{len(display)} recommendation(s)")
     st.markdown(
-        theme.render_table(display[['Date', 'Stock', 'Purchase Price', 'Target Price', 'Status']],
-                           money_cols=['Purchase Price', 'Target Price'], status_col='Status'),
+        theme.render_table(display[['Date', 'Stock', 'Purchase Price', 'Target Price', 'Status', '_status_raw']],
+                           money_cols=['Purchase Price', 'Target Price'], status_col='Status',
+                           status_class_col='_status_raw'),
         unsafe_allow_html=True
     )
+
+
+def _needs_review_reason(notes):
+    """Turn the raw notes the buy bot left into a one-line explanation of
+    what's actually needed, instead of making the user parse the log-style
+    text themselves."""
+    n = notes or ''
+    if 'status=FUZZY' in n:
+        return "The bot found a similar-sounding symbol but wasn't confident enough to trust it — enter the correct Kite trading symbol below."
+    if 'status=NOT_FOUND' in n:
+        return "The bot couldn't find any matching symbol on Kite — enter the correct Kite trading symbol below."
+    return n or "Needs manual review."
+
+
+def page_needs_review():
+    st.title("Needs Review")
+    st.caption("Tips the buy bot refused to guess a symbol for, rather than risk buying the wrong stock. "
+               "Enter the correct Kite symbol, preview exactly what it would buy, then confirm to place "
+               "a real order — nothing is bought until you click Confirm.")
+
+    df = db.needs_review_trades()
+    if df.empty:
+        st.info("Nothing needs review right now.")
+        return
+
+    for _, row in df.iterrows():
+        tid = int(row['trade_id'])
+        with st.expander(f"#{tid} — {row['stock_name']} ({row['buy_date']})", expanded=True):
+            st.warning(_needs_review_reason(row['notes']))
+            st.caption(f"Category: {row['category_name']} · Recommended price: {fmt(row['recommended_price'])}")
+
+            symbol = st.text_input("Correct Kite trading symbol", key=f'nr_symbol_{tid}',
+                                   placeholder="e.g. VOLTAMP").strip().upper()
+
+            preview_key = f'nr_preview_{tid}'
+            col_preview, col_confirm = st.columns([1, 2])
+            with col_preview:
+                if st.button("Preview", key=f'nr_preview_btn_{tid}', disabled=not symbol):
+                    try:
+                        st.session_state[preview_key] = kite_data.preview_retry_buy(tid, symbol)
+                    except Exception as e:
+                        st.session_state.pop(preview_key, None)
+                        st.error(str(e))
+
+            preview = st.session_state.get(preview_key)
+            if preview and preview['symbol'] != symbol:
+                st.caption("Symbol changed since last preview — click Preview again before confirming.")
+            elif preview:
+                st.markdown(
+                    f"Would place: **{preview['order_type']}** {preview['qty']} × {preview['symbol']} "
+                    f"@ {fmt(preview['buy_price'])} — actual cost {fmt(preview['actual_cost'])} "
+                    f"(live market price {fmt(preview['mkt_price'])}, cap type: {preview['cap_type'] or 'unknown'})"
+                )
+                if not preview['budget_ok']:
+                    st.error("Insufficient budget in this category/stock-type — the live bot would SKIP "
+                             "this trade rather than buy it, so Confirm is disabled.")
+                else:
+                    if st.button(f"Confirm & Buy #{tid} — places a REAL order", key=f'nr_confirm_{tid}', type="primary"):
+                        try:
+                            order_id = kite_data.confirm_retry_buy(preview)
+                            st.success(f"Bought — order {order_id}")
+                            st.session_state.pop(preview_key, None)
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Buy failed: {e}")
 
 
 def page_classification():
@@ -594,6 +667,7 @@ PAGES = [
     "Set Targets",
     "Trades Explorer",
     "Recommendations",
+    "Needs Review",
     "Orders",
     "Classification",
     "Settings & Edits",
@@ -626,6 +700,8 @@ def main():
             page_trades()
         elif page == "Recommendations":
             page_recommendations()
+        elif page == "Needs Review":
+            page_needs_review()
         elif page == "Orders":
             page_orders()
         elif page == "Classification":

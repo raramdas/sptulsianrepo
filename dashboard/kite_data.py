@@ -6,15 +6,22 @@ today's order book).
 IMPORTANT: this module does NOT call Kite's live API on every dashboard
 view. It used to, but per explicit preference (avoid drawing Zerodha's
 attention / rate limiting with frequent automated API calls from a
-customer-facing web app), the only live Kite call left is sync_now() —
+customer-facing web app), the only routine live Kite call is sync_now() —
 triggered exclusively by the "Sync Kite Data" button on Overview. Every
-other function here reads back the last-synced snapshot from Oracle
+other read function here reads back the last-synced snapshot from Oracle
 (kite_holdings_snapshot / kite_gtt_snapshot / kite_orders_snapshot,
 written by db.save_kite_snapshot()).
+
+The one deliberate exception is the Needs Review retry-buy flow
+(preview_retry_buy / confirm_retry_buy) — a manually-triggered, one-off
+live quote + real order placement for a single trade the buy bot refused
+to guess a symbol for. preview_retry_buy() places nothing; confirm_retry_buy()
+is the only function in this entire module that trades.
 
 Same enctoken-based login as kite_client.py/kite_common.py (the bot side),
 reused here rather than duplicated.
 """
+import math
 import os
 import requests
 import pyotp
@@ -23,6 +30,8 @@ import streamlit as st
 from dotenv import load_dotenv
 
 import db
+
+INVEST_AMT = 5000  # mirrors config.py's INVEST_AMT — keep in sync if that ever changes
 
 load_dotenv('/home/ubuntu/.env')
 
@@ -304,6 +313,99 @@ def open_orders_count():
     """Orders currently OPEN at the broker (as of last sync) — triggered
     GTT sells and pending buy orders not yet filled."""
     return sum(1 for o in get_orders() if str(o.get('status', '')).upper() == 'OPEN')
+
+
+# ── Needs Review: manual retry-buy for a symbol the bot refused to guess ──
+# Always against the NEW account — the buy bot only ever runs on NEW going
+# forward, so a manual retry belongs there too.
+
+def get_quote(symbol, account_label='NEW'):
+    """Live last-traded price for a symbol. Only used by the retry-buy
+    preview, to price a manually-corrected symbol before anyone commits to
+    buying it."""
+    enctoken = _get_enctoken(account_label)
+    r = requests.get(f'{OMS_BASE}/quote', params={'i': f'NSE:{symbol}'},
+                      headers=kite_headers(enctoken), timeout=15)
+    data = r.json()
+    if data.get('status') != 'success':
+        raise RuntimeError(f"Kite quote failed: {data.get('message')}")
+    q = data.get('data', {}).get(f'NSE:{symbol}')
+    if not q or not q.get('last_price'):
+        raise RuntimeError(f"No live quote for NSE:{symbol} — double check the symbol is correct")
+    return float(q['last_price'])
+
+
+def preview_retry_buy(trade_id, symbol):
+    """Compute what a retry-buy WOULD do for a NEEDS_REVIEW trade, given a
+    manually-corrected symbol — live quote, cap-type lookup, the same
+    price/order-type/qty decision and budget check main.py's process_tip()
+    uses. Places NO order. Always call this before confirm_retry_buy() and
+    show the result to a human — never skip straight to confirming."""
+    rows = db.needs_review_trades()
+    match = rows[rows['trade_id'] == trade_id]
+    if match.empty:
+        raise RuntimeError(f"Trade #{trade_id} not found (or no longer NEEDS_REVIEW)")
+    row = match.iloc[0]
+
+    symbol = symbol.strip().upper()
+    if not symbol:
+        raise RuntimeError("Enter a symbol first")
+
+    category = row['category_name']
+    email_price = float(row['recommended_price'])
+    mkt_price = get_quote(symbol, 'NEW')
+
+    if mkt_price < email_price:
+        buy_price, order_type = mkt_price, 'MARKET'
+    else:
+        buy_price, order_type = email_price, 'LIMIT'
+
+    qty = max(1, math.floor(INVEST_AMT / buy_price))
+    actual_cost = qty * buy_price
+
+    cap_type = db.get_stock_cap_type(symbol)
+    budget_ok, category_id = db.check_budget_available(category, cap_type, actual_cost)
+
+    return {
+        'trade_id': int(trade_id), 'category': category, 'category_id': category_id,
+        'stock_name': row['stock_name'], 'symbol': symbol, 'cap_type': cap_type,
+        'email_price': email_price, 'mkt_price': mkt_price,
+        'buy_price': buy_price, 'order_type': order_type,
+        'qty': qty, 'actual_cost': actual_cost, 'budget_ok': budget_ok,
+    }
+
+
+def confirm_retry_buy(preview):
+    """Place the real buy order for a previewed retry-buy, then update
+    Oracle. The ONLY function in this module that trades — takes exactly
+    the dict preview_retry_buy() returned, never raw user input, so what
+    gets bought is always what was already shown and reviewed."""
+    if not preview.get('budget_ok'):
+        raise RuntimeError("Budget check failed for this category/stock-type — "
+                            "the live bot would SKIP this trade, not buy it")
+    enctoken = _get_enctoken('NEW')
+    payload = {
+        'exchange': 'NSE', 'tradingsymbol': preview['symbol'],
+        'transaction_type': 'BUY', 'quantity': preview['qty'],
+        'order_type': preview['order_type'], 'product': 'CNC',
+        'validity': 'DAY', 'tag': 'SPT',
+    }
+    if preview['order_type'] == 'LIMIT':
+        payload['price'] = preview['buy_price']
+    r = requests.post(f'{OMS_BASE}/orders/regular', headers=kite_headers(enctoken), data=payload, timeout=15)
+    res = r.json()
+    if res.get('status') != 'success':
+        raise RuntimeError(f"Buy failed: {res.get('message')}")
+    buy_order_id = res['data']['order_id']
+
+    db.apply_retry_buy(
+        trade_id=preview['trade_id'], category_id=preview['category_id'],
+        symbol=preview['symbol'], stock_type=preview['cap_type'],
+        order_type=preview['order_type'], buy_order_id=buy_order_id,
+        market_price=preview['mkt_price'], buy_price=preview['buy_price'],
+        qty=preview['qty'], invested_amount=preview['actual_cost'],
+    )
+    return buy_order_id
 
 
 if __name__ == '__main__':
