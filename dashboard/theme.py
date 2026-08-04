@@ -123,6 +123,24 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
     box-shadow: 0 0 0 1px {ACCENT} !important;
 }}
 
+/* Expanders (Needs Review page) — Streamlit's native header background
+   doesn't match this app's light theme, and the broad `.stApp * {{ color:
+   {INK} }}` rule above then renders dark text on that same dark background.
+   Force both explicitly so the header stays readable regardless of
+   Streamlit's own theme defaults. */
+[data-testid="stExpander"] summary {{
+    background-color: {SURFACE} !important;
+    color: {INK} !important;
+    border-radius: 8px;
+}}
+[data-testid="stExpander"] summary p {{
+    color: {INK} !important;
+    font-weight: 600;
+}}
+[data-testid="stExpander"] summary svg {{
+    fill: {INK} !important;
+}}
+
 /* KPI cards */
 .kpi-card {{
     background-color: {BG};
