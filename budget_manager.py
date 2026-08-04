@@ -178,9 +178,9 @@ def insert_trade_to_oracle(tip, category_id):
         today = datetime.now(IST).date()
         buy_status = tip.get('buy_status')
         # Only trades that actually went through count as invested money.
-        # SKIPPED/ERROR/NEEDS_REVIEW trades never spent anything, regardless
-        # of the qty/price that was calculated for the budget check.
-        if buy_status in ('ERROR', 'SKIPPED', 'NEEDS_REVIEW'):
+        # SKIPPED/ERROR/NEEDS_REVIEW/PENDING_BUY trades never spent anything,
+        # regardless of the qty/price that was calculated for the budget check.
+        if buy_status in ('ERROR', 'SKIPPED', 'NEEDS_REVIEW', 'PENDING_BUY'):
             invested_amount = 0
         else:
             invested_amount = (tip.get('buy_price') or 0) * (tip.get('qty') or 0)
@@ -207,7 +207,7 @@ def insert_trade_to_oracle(tip, category_id):
             'target_price': tip.get('target') or None,
             'timeframe': tip.get('timeframe', ''),
             'have_interest': tip.get('have_interest', ''),
-            'status': tip.get('buy_status') if tip.get('buy_status') in ('ERROR', 'SKIPPED', 'NEEDS_REVIEW') else 'Open',
+            'status': tip.get('buy_status') if tip.get('buy_status') in ('ERROR', 'SKIPPED', 'NEEDS_REVIEW', 'PENDING_BUY') else 'Open',
             'my_buy_date': today,
             'order_type': tip.get('order_type', ''),
             'buy_order_id': tip.get('buy_order_id', ''),
@@ -222,6 +222,111 @@ def insert_trade_to_oracle(tip, category_id):
         log(f"  Trade inserted into Oracle: {tip.get('stock')}")
     except Exception as e:
         log(f"  Oracle insert error: {e}")
+
+
+def get_pending_buy_trades(scan_dates):
+    """PENDING_BUY trades written by main_recommend.py's Phase 1 run, within
+    the scan date window — ready for main.py's Phase 2 to price, budget-
+    check, and buy."""
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        placeholders = ",".join(f":d{i}" for i in range(len(scan_dates)))
+        params = {f"d{i}": d for i, d in enumerate(scan_dates)}
+        cursor.execute(f"""
+            SELECT trade_id, category_name, stock_name, symbol, stock_type,
+                   recommended_price, target_price, timeframe, have_interest
+            FROM trades
+            WHERE status = 'PENDING_BUY'
+              AND TO_CHAR(buy_date, 'YYYY-MM-DD') IN ({placeholders})
+        """, params)
+        cols = [d[0].lower() for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+    except Exception as e:
+        log(f"  get_pending_buy_trades error: {e}")
+        return []
+
+
+def get_needs_review_trades_for_retry(scan_dates):
+    """NEEDS_REVIEW trades to re-attempt symbol resolution for in Phase 2,
+    in case SYMBOL_MAP was fixed between the recommend run and the buy run.
+    Deliberately scoped by the CALLER to today only (not a rolling window
+    like get_pending_buy_trades) — old, still-unresolved NEEDS_REVIEW rows
+    should sit for a human to review via the dashboard, not get silently
+    retried and bought days later with nobody watching."""
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        placeholders = ",".join(f":d{i}" for i in range(len(scan_dates)))
+        params = {f"d{i}": d for i, d in enumerate(scan_dates)}
+        cursor.execute(f"""
+            SELECT trade_id, category_name, stock_name, recommended_price,
+                   target_price, timeframe, have_interest
+            FROM trades
+            WHERE status = 'NEEDS_REVIEW'
+              AND TO_CHAR(buy_date, 'YYYY-MM-DD') IN ({placeholders})
+        """, params)
+        cols = [d[0].lower() for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+    except Exception as e:
+        log(f"  get_needs_review_trades_for_retry error: {e}")
+        return []
+
+
+def update_trade_after_buy_attempt(trade_id, status, category_id=None, symbol=None, stock_type=None,
+                                    order_type=None, buy_order_id=None, market_price_at_buy=None,
+                                    my_buy_price=None, my_buy_qty=None, invested_amount=0, notes=None):
+    """Phase 2 (main.py) update for a trade recommended in Phase 1
+    (main_recommend.py) that has now had a real buy attempt — success
+    (status='Open'), insufficient budget (status='SKIPPED'), or an error
+    (status='ERROR'). symbol/stock_type are only passed when retrying a
+    NEEDS_REVIEW trade that has since resolved cleanly; category_name,
+    stock_name, buy_date, recommended_price etc. were already set correctly
+    by Phase 1 and are left untouched here."""
+    conn = get_oracle_connection()
+    if not conn:
+        log("  Oracle update skipped — no connection")
+        return
+    try:
+        cursor = conn.cursor()
+        set_clauses = ["status = :status", "notes = :notes", "updated_at = SYSTIMESTAMP"]
+        params = {'status': status, 'notes': notes, 'id': trade_id}
+        if category_id is not None:
+            set_clauses.append("category_id = :category_id"); params['category_id'] = category_id
+        if symbol is not None:
+            set_clauses.append("symbol = :symbol"); params['symbol'] = symbol
+        if stock_type is not None:
+            set_clauses.append("stock_type = :stock_type"); params['stock_type'] = stock_type
+        if order_type is not None:
+            set_clauses.append("order_type = :order_type"); params['order_type'] = order_type
+        if buy_order_id is not None:
+            set_clauses.append("buy_order_id = :buy_order_id"); params['buy_order_id'] = buy_order_id
+        if market_price_at_buy is not None:
+            set_clauses.append("market_price_at_buy = :market_price_at_buy"); params['market_price_at_buy'] = market_price_at_buy
+        if my_buy_price is not None:
+            set_clauses.append("my_buy_price = :my_buy_price"); params['my_buy_price'] = my_buy_price
+        if my_buy_qty is not None:
+            set_clauses.append("my_buy_qty = :my_buy_qty"); params['my_buy_qty'] = my_buy_qty
+        if status == 'Open':
+            set_clauses.append("my_buy_date = SYSDATE")
+            set_clauses.append("invested_amount = :invested_amount")
+            params['invested_amount'] = invested_amount
+        else:
+            set_clauses.append("invested_amount = 0")
+        cursor.execute(f"UPDATE trades SET {', '.join(set_clauses)} WHERE trade_id = :id", params)
+        conn.commit()
+        cursor.close()
+        log(f"  Trade #{trade_id} updated: status={status}")
+    except Exception as e:
+        log(f"  update_trade_after_buy_attempt error: {e}")
 
 
 def get_open_trades_with_target(scan_dates):
