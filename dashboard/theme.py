@@ -269,7 +269,6 @@ div[data-testid="stForm"] {{
     .kpi-card .value {{ font-size: 1.25rem; }}
     .cat-row .cat-header {{ flex-direction: column; align-items: flex-start; }}
     div[data-testid="stForm"] {{ padding: 1.25rem; }}
-    section[data-testid="stSidebar"] {{ min-width: 100% !important; }}
 }}
 </style>
 """
