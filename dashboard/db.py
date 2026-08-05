@@ -574,13 +574,16 @@ def get_category_id(category_name):
         conn.close()
 
 
-def check_budget_available(category_name, cap_type, invest_amt):
-    """Category budget + stock-type-within-category budget check — exact
-    port of budget_manager.py's check_budget_available() so a manual retry
-    buy from the dashboard is governed by the identical rule the live bot
-    uses. Returns (True, category_id) if invest_amt fits in both, else
-    (False, category_id/None). Fails open (allows) only on a genuine DB
-    error, matching the live bot's behavior."""
+def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
+    """Category budget + per-stock position-size cap within the category —
+    exact port of budget_manager.py's check_budget_available() so a manual
+    retry buy from the dashboard is governed by the identical rule the live
+    bot uses. The cap_type percentage (e.g. Micro Cap 2%) is a MAX POSITION
+    SIZE for a single stock, not a bucket shared across every stock of that
+    cap type (corrected 2026-08-05 alongside the same fix in
+    budget_manager.py). Returns (True, category_id) if invest_amt fits
+    both, else (False, category_id/None). Fails open (allows) only on a
+    genuine DB error, matching the live bot's behavior."""
     conn = get_connection()
     try:
         category_id = get_category_id(category_name)
@@ -595,30 +598,29 @@ def check_budget_available(category_name, cap_type, invest_amt):
         if category_available < invest_amt:
             return False, category_id
 
-        if cap_type:
+        if cap_type and symbol:
             cur.execute("""
-                SELECT stock_type_budget, invested FROM stock_type_budget_status
-                WHERE category_name = :name AND stock_type = :cap_type
-            """, {'name': category_name, 'cap_type': cap_type})
-            row = cur.fetchone()
-            if row:
-                stock_type_available = float(row[0]) - float(row[1])
-            else:
-                cur.execute("""
-                    SELECT CASE :cap_type
-                        WHEN 'Large Cap' THEN large_cap_pct
-                        WHEN 'Mid Cap'   THEN mid_cap_pct
-                        WHEN 'Small Cap' THEN small_cap_pct
-                        WHEN 'Micro Cap' THEN micro_cap_pct
-                    END
-                    FROM category_allocation WHERE category_id = :cid
-                """, {'cap_type': cap_type, 'cid': category_id})
-                pct_row = cur.fetchone()
-                pct = float(pct_row[0]) if pct_row and pct_row[0] else 0
-                cur.execute("SELECT total_budget FROM portfolio_budget WHERE is_active = 'Y'")
-                total_budget = float(cur.fetchone()[0])
-                stock_type_available = total_budget * pct / 100
-            if stock_type_available < invest_amt:
+                SELECT CASE :cap_type
+                    WHEN 'Large Cap' THEN large_cap_pct
+                    WHEN 'Mid Cap'   THEN mid_cap_pct
+                    WHEN 'Small Cap' THEN small_cap_pct
+                    WHEN 'Micro Cap' THEN micro_cap_pct
+                END
+                FROM category_allocation WHERE category_id = :cid
+            """, {'cap_type': cap_type, 'cid': category_id})
+            pct_row = cur.fetchone()
+            pct = float(pct_row[0]) if pct_row and pct_row[0] else 0
+            cur.execute("SELECT total_budget FROM portfolio_budget WHERE is_active = 'Y'")
+            total_budget = float(cur.fetchone()[0])
+            max_position = total_budget * pct / 100
+
+            cur.execute("""
+                SELECT NVL(SUM(invested_amount), 0) FROM trades
+                WHERE category_name = :name AND UPPER(symbol) = UPPER(:symbol) AND status = 'Open'
+            """, {'name': category_name, 'symbol': symbol})
+            already_invested = float(cur.fetchone()[0])
+            stock_available = max_position - already_invested
+            if stock_available < invest_amt:
                 return False, category_id
 
         return True, category_id

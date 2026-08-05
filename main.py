@@ -54,7 +54,7 @@ def attempt_buy(trade, enctoken):
         'mkt_price': mkt_price, 'buy_price': buy_price, 'order_type': order_type, 'qty': qty,
     }
 
-    budget_ok, category_id = check_budget_available(category, cap_type, actual_cost)
+    budget_ok, category_id = check_budget_available(category, cap_type, actual_cost, symbol=symbol)
     if not budget_ok:
         log(f"SKIPPING {stock} — insufficient budget for actual cost Rs.{actual_cost:,.2f}")
         sheet_tip['note'] = 'Insufficient category/stock-type budget'

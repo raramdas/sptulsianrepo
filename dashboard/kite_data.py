@@ -387,7 +387,7 @@ def preview_retry_buy(trade_id, symbol):
     actual_cost = qty * buy_price
 
     cap_type = db.get_stock_cap_type(symbol)
-    budget_ok, category_id = db.check_budget_available(category, cap_type, actual_cost)
+    budget_ok, category_id = db.check_budget_available(category, cap_type, actual_cost, symbol=symbol)
 
     return {
         'trade_id': int(trade_id), 'category': category, 'category_id': category_id,

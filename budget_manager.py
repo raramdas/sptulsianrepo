@@ -88,13 +88,24 @@ def get_category_id(category_name):
         return None
 
 
-def check_budget_available(category_name, cap_type, invest_amt):
+def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
     """
-    Check both category budget and stock-type-within-category budget.
-    Returns (True, category_id) if invest_amt fits in BOTH, else (False, category_id/None).
-    If cap_type is unknown, only the category budget is checked (fallback).
-    If Oracle is unreachable, fails open (allows the trade) so the buy bot
-    isn't blocked entirely by a DB outage.
+    Check both category budget and per-stock position-size cap within the
+    category. Returns (True, category_id) if invest_amt fits BOTH, else
+    (False, category_id/None).
+
+    The cap_type percentage (e.g. Micro Cap 2%) is a MAX POSITION SIZE for
+    a single stock — 2% of the total portfolio budget is the ceiling on how
+    much can be invested in any ONE Micro Cap stock, not a shared bucket
+    pooled across every Micro Cap stock in the category. (Corrected
+    2026-08-05 — the original implementation pooled all stocks of a
+    cap-type together in one bucket, which wrongly blocked Apollo Micro
+    Systems and Zee Ent — each individually nowhere near its own 2% cap —
+    just because OTHER Micro Cap stocks had used up the shared bucket.)
+
+    If cap_type or symbol is unknown, only the category budget is checked
+    (fallback). If Oracle is unreachable, fails open (allows the trade) so
+    the buy bot isn't blocked entirely by a DB outage.
     """
     conn = get_oracle_connection()
     if not conn:
@@ -122,41 +133,39 @@ def check_budget_available(category_name, cap_type, invest_amt):
             cursor.close()
             return False, category_id
 
-        # 2. Stock-type-level available budget (only if cap_type is known)
-        if cap_type:
+        # 2. Per-stock position-size cap within the category (only if both
+        # cap_type and symbol are known)
+        if cap_type and symbol:
             cursor.execute("""
-                SELECT stock_type_budget, invested
-                FROM stock_type_budget_status
-                WHERE category_name = :name AND stock_type = :cap_type
-            """, {'name': category_name, 'cap_type': cap_type})
-            row = cursor.fetchone()
-            if row:
-                stock_type_budget, invested = float(row[0]), float(row[1])
-                stock_type_available = stock_type_budget - invested
-            else:
-                # No trades yet for this stock_type in this category — full budget available
-                cursor.execute("""
-                    SELECT CASE :cap_type
-                        WHEN 'Large Cap' THEN large_cap_pct
-                        WHEN 'Mid Cap'   THEN mid_cap_pct
-                        WHEN 'Small Cap' THEN small_cap_pct
-                        WHEN 'Micro Cap' THEN micro_cap_pct
-                    END
-                    FROM category_allocation WHERE category_id = :cid
-                """, {'cap_type': cap_type, 'cid': category_id})
-                pct_row = cursor.fetchone()
-                pct = float(pct_row[0]) if pct_row and pct_row[0] else 0
-                cursor.execute("SELECT total_budget FROM portfolio_budget WHERE is_active = 'Y'")
-                total_budget = float(cursor.fetchone()[0])
-                stock_type_available = total_budget * pct / 100
+                SELECT CASE :cap_type
+                    WHEN 'Large Cap' THEN large_cap_pct
+                    WHEN 'Mid Cap'   THEN mid_cap_pct
+                    WHEN 'Small Cap' THEN small_cap_pct
+                    WHEN 'Micro Cap' THEN micro_cap_pct
+                END
+                FROM category_allocation WHERE category_id = :cid
+            """, {'cap_type': cap_type, 'cid': category_id})
+            pct_row = cursor.fetchone()
+            pct = float(pct_row[0]) if pct_row and pct_row[0] else 0
+            cursor.execute("SELECT total_budget FROM portfolio_budget WHERE is_active = 'Y'")
+            total_budget = float(cursor.fetchone()[0])
+            max_position = total_budget * pct / 100
 
-            if stock_type_available < invest_amt:
-                log(f"  Budget check: {cap_type} in '{category_name}' available Rs.{stock_type_available:,.2f} "
+            cursor.execute("""
+                SELECT NVL(SUM(invested_amount), 0) FROM trades
+                WHERE category_name = :name AND UPPER(symbol) = UPPER(:symbol) AND status = 'Open'
+            """, {'name': category_name, 'symbol': symbol})
+            already_invested = float(cursor.fetchone()[0])
+            stock_available = max_position - already_invested
+
+            if stock_available < invest_amt:
+                log(f"  Budget check: {symbol} ({cap_type}) position cap Rs.{max_position:,.2f}, already "
+                    f"invested Rs.{already_invested:,.2f}, available Rs.{stock_available:,.2f} "
                     f"< needed Rs.{invest_amt:,.2f} — SKIP")
                 cursor.close()
                 return False, category_id
         else:
-            log(f"  Budget check: cap_type unknown — checking category budget only (fallback)")
+            log(f"  Budget check: cap_type or symbol unknown — checking category budget only (fallback)")
 
         cursor.close()
         log(f"  Budget check PASSED: category available Rs.{category_available:,.2f}, proceeding with Rs.{invest_amt:,.2f}")
