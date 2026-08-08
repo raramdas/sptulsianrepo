@@ -12,15 +12,21 @@ This replaces the earlier gold/vault ("ledger") direction — Rajesh picked
 the clean minimal option when shown three style directions.
 
 Colors
-  bg          #FFFFFF   page background
-  surface     #F8FAFC   subtle panel background (sidebar, hover states)
-  border      #E2E8F0   card borders, dividers
-  ink         #0F172A   primary text
-  muted       #64748B   secondary text, labels, captions
+  bg          #FAFAFA   page canvas — cards sit ON this, giving depth
+                        without borders doing all the work
+  card        #FFFFFF   card/panel surface — KPI cards, forms, table wraps
+  surface     #F8FAFC   sidebar background (nearly the same tone as bg,
+                        so nav recedes and cards are what pop)
+  border      #E5E7EB   card borders, dividers — soft, near-invisible;
+                        cards read mainly through a subtle shadow, not a line
+  ink         #111827   primary text
+  muted       #6B7280   secondary text, labels, captions
   accent      #2563EB   brand / interactive accent (buttons, active nav, links)
   accent-dim  #DBEAFE   accent tint (active nav background, subtle fills)
   positive    #16A34A   gains, available budget
   negative    #DC2626   losses, over-budget, errors
+  warning     #F59E0B   deferred/caution states (e.g. SKIPPED — budget-blocked,
+                        not actually broken like ERROR)
 
 Type
   body : 'Inter'      — everything (headers included, just heavier weight)
@@ -31,15 +37,18 @@ Type
 import streamlit as st
 import pandas as pd
 
-BG        = "#FFFFFF"
+BG        = "#FAFAFA"
+CARD      = "#FFFFFF"
 SURFACE   = "#F8FAFC"
-BORDER    = "#E2E8F0"
-INK       = "#0F172A"
-MUTED     = "#64748B"
+BORDER    = "#E5E7EB"
+INK       = "#111827"
+MUTED     = "#6B7280"
 ACCENT    = "#2563EB"
 ACCENT_DIM = "#DBEAFE"
 POSITIVE  = "#16A34A"
 NEGATIVE  = "#DC2626"
+WARNING   = "#F59E0B"
+SHADOW    = "0 1px 2px rgba(17,24,39,0.04), 0 1px 6px rgba(17,24,39,0.04)"
 
 
 CSS = f"""
@@ -112,7 +121,7 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 
 /* Inputs */
 .stTextInput input, .stNumberInput input, .stSelectbox [data-baseweb="select"] > div, .stDateInput input {{
-    background-color: {BG} !important;
+    background-color: {CARD} !important;
     color: {INK} !important;
     border: 1px solid {BORDER} !important;
     border-radius: 6px !important;
@@ -143,24 +152,26 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 
 /* KPI cards */
 .kpi-card {{
-    background-color: {BG};
+    background-color: {CARD};
     border: 1px solid {BORDER};
-    border-radius: 10px;
-    padding: 1.1rem 1.3rem;
+    border-radius: 12px;
+    box-shadow: {SHADOW};
+    padding: 1.2rem 1.4rem;
     margin-bottom: 0.6rem;
 }}
 .kpi-card .label {{
     font-family: 'Inter', sans-serif;
     font-size: 0.72rem;
-    font-weight: 600;
+    font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: {MUTED} !important;
-    margin-bottom: 0.4rem;
+    margin-bottom: 0.45rem;
 }}
 .kpi-card .value {{
-    font-size: 1.6rem;
+    font-size: 1.85rem;
     font-weight: 700;
+    letter-spacing: -0.02em;
     color: {INK} !important;
     font-variant-numeric: tabular-nums;
     word-break: break-word;
@@ -201,8 +212,10 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 /* Table */
 .ledger-table-wrap {{
     overflow-x: auto;
-    border-radius: 8px;
+    border-radius: 10px;
     border: 1px solid {BORDER};
+    box-shadow: {SHADOW};
+    background-color: {CARD};
 }}
 .ledger-table {{
     width: 100%;
@@ -220,31 +233,34 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
     color: {MUTED} !important;
     background-color: {SURFACE};
     border-bottom: 1px solid {BORDER};
-    padding: 0.6rem 0.7rem;
+    padding: 0.65rem 0.75rem;
     position: sticky;
     top: 0;
 }}
 .ledger-table td {{
-    padding: 0.55rem 0.7rem;
+    padding: 0.6rem 0.75rem;
     border-bottom: 1px solid {BORDER};
     color: {INK} !important;
     white-space: nowrap;
 }}
+.ledger-table tr:last-child td {{ border-bottom: none; }}
 .ledger-table tr:nth-child(even) td {{ background-color: {SURFACE}; }}
 .ledger-table td.num {{ text-align: right; }}
 .ledger-table td.status-open {{ color: {POSITIVE} !important; font-weight: 600; }}
 .ledger-table td.status-closed {{ color: {MUTED} !important; }}
-.ledger-table td.status-error, .ledger-table td.status-skipped {{ color: {NEGATIVE} !important; }}
+.ledger-table td.status-error {{ color: {NEGATIVE} !important; font-weight: 600; }}
+.ledger-table td.status-skipped {{ color: {WARNING} !important; font-weight: 600; }}
 .ledger-table td.status-needs_review {{ color: {ACCENT} !important; font-weight: 600; }}
 .ledger-table td.gain-pos {{ color: {POSITIVE} !important; font-weight: 600; }}
 .ledger-table td.gain-neg {{ color: {NEGATIVE} !important; font-weight: 600; }}
 
 /* Login form */
 div[data-testid="stForm"] {{
-    background-color: {BG};
+    background-color: {CARD};
     border: 1px solid {BORDER};
     border-top: 3px solid {ACCENT};
-    border-radius: 10px;
+    border-radius: 12px;
+    box-shadow: {SHADOW};
     padding: 1.75rem;
     box-shadow: 0 4px 16px rgba(15,23,42,0.06);
 }}
