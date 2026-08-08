@@ -81,6 +81,10 @@ h1, h2, h3 {{
     font-weight: 700 !important;
 }}
 h1 {{ border-bottom: 1px solid {BORDER}; padding-bottom: 0.6rem; margin-bottom: 1.2rem; font-size: 1.7rem !important; }}
+/* Notion-style rhythm — every section header gets the same generous
+   breathing room, so the page reads in distinct beats instead of a
+   continuous wall of content. */
+h2, h3 {{ margin-top: 1.9rem !important; margin-bottom: 0.9rem !important; }}
 
 /* Sidebar — light surface, blue active state */
 section[data-testid="stSidebar"] {{
@@ -94,13 +98,22 @@ section[data-testid="stSidebar"] [data-testid="stCaptionContainer"] {{
     color: {MUTED} !important;
 }}
 section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label {{
-    padding: 0.4rem 0.6rem;
+    padding: 0.45rem 0.7rem 0.45rem 0.6rem;
     border-radius: 6px;
     font-size: 0.92rem;
-    margin-bottom: 0.1rem;
+    margin-bottom: 0.15rem;
+    border-left: 3px solid transparent;
+    transition: background-color 0.12s ease, border-left-color 0.12s ease;
+}}
+section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:hover {{
+    background-color: rgba(37, 99, 235, 0.06);
 }}
 section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) {{
     background-color: {ACCENT_DIM};
+    border-left-color: {ACCENT};
+}}
+section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:checked) p {{
+    font-weight: 600 !important;
 }}
 
 /* Buttons */
@@ -111,12 +124,15 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
     font-family: 'Inter', sans-serif;
     font-weight: 600;
     border-radius: 6px;
-    transition: background-color 0.15s ease;
+    transition: background-color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }}
 .stButton button *, .stFormSubmitButton button *, .stDownloadButton button * {{ color: #FFFFFF !important; }}
 .stButton button:hover, .stFormSubmitButton button:hover, .stDownloadButton button:hover {{
     background-color: {ACCENT};
     border-color: {ACCENT};
+}}
+.stButton button:active, .stFormSubmitButton button:active, .stDownloadButton button:active {{
+    transform: scale(0.98);
 }}
 
 /* Inputs */
@@ -126,6 +142,7 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
     border: 1px solid {BORDER} !important;
     border-radius: 6px !important;
     font-variant-numeric: tabular-nums;
+    transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }}
 .stTextInput input:focus, .stNumberInput input:focus {{
     border-color: {ACCENT} !important;
@@ -154,11 +171,20 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 .kpi-card {{
     background-color: {CARD};
     border: 1px solid {BORDER};
+    border-top: 3px solid transparent;
     border-radius: 12px;
     box-shadow: {SHADOW};
     padding: 1.2rem 1.4rem;
     margin-bottom: 0.6rem;
+    transition: box-shadow 0.15s ease, transform 0.15s ease;
 }}
+.kpi-card:hover {{
+    box-shadow: 0 2px 4px rgba(17,24,39,0.06), 0 6px 16px rgba(17,24,39,0.08);
+    transform: translateY(-1px);
+}}
+.kpi-card.tone-positive {{ border-top-color: {POSITIVE}; }}
+.kpi-card.tone-negative {{ border-top-color: {NEGATIVE}; }}
+.kpi-card.tone-accent   {{ border-top-color: {ACCENT}; }}
 .kpi-card .label {{
     font-family: 'Inter', sans-serif;
     font-size: 0.72rem;
@@ -204,6 +230,7 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
     height: 100%;
     background-color: {ACCENT};
     border-radius: 4px 0 0 4px;
+    transition: width 0.4s ease;
 }}
 .cat-fill.over {{
     background-color: {NEGATIVE};
@@ -245,14 +272,39 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 }}
 .ledger-table tr:last-child td {{ border-bottom: none; }}
 .ledger-table tr:nth-child(even) td {{ background-color: {SURFACE}; }}
+.ledger-table tbody tr {{ transition: background-color 0.12s ease; }}
+.ledger-table tbody tr:hover td {{ background-color: rgba(37, 99, 235, 0.05) !important; }}
 .ledger-table td.num {{ text-align: right; }}
-.ledger-table td.status-open {{ color: {POSITIVE} !important; font-weight: 600; }}
-.ledger-table td.status-closed {{ color: {MUTED} !important; }}
-.ledger-table td.status-error {{ color: {NEGATIVE} !important; font-weight: 600; }}
-.ledger-table td.status-skipped {{ color: {WARNING} !important; font-weight: 600; }}
-.ledger-table td.status-needs_review {{ color: {ACCENT} !important; font-weight: 600; }}
 .ledger-table td.gain-pos {{ color: {POSITIVE} !important; font-weight: 600; }}
 .ledger-table td.gain-neg {{ color: {NEGATIVE} !important; font-weight: 600; }}
+
+/* Status pills — a colored dot + tinted background badge instead of plain
+   colored text, so status reads at a glance the way it does in Linear/
+   Notion rather than blending into the rest of the row. */
+.status-pill {{
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.2rem 0.65rem;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.5;
+    white-space: nowrap;
+}}
+.status-pill::before {{
+    content: '';
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: currentColor;
+    flex-shrink: 0;
+}}
+.status-pill-open          {{ color: {POSITIVE}; background-color: #DCFCE7; }}
+.status-pill-closed        {{ color: {MUTED};    background-color: {SURFACE}; }}
+.status-pill-error         {{ color: {NEGATIVE}; background-color: #FEE2E2; }}
+.status-pill-skipped       {{ color: {WARNING};  background-color: #FEF3C7; }}
+.status-pill-needs_review  {{ color: {ACCENT};   background-color: {ACCENT_DIM}; }}
 
 /* Login form */
 div[data-testid="stForm"] {{
@@ -260,9 +312,8 @@ div[data-testid="stForm"] {{
     border: 1px solid {BORDER};
     border-top: 3px solid {ACCENT};
     border-radius: 12px;
-    box-shadow: {SHADOW};
-    padding: 1.75rem;
     box-shadow: 0 4px 16px rgba(15,23,42,0.06);
+    padding: 1.75rem;
 }}
 
 /* Simple badge/pill, used for coverage status etc. */
@@ -423,11 +474,15 @@ def friendly_status(status, notes):
 
 def render_table(df, money_cols=None, status_col=None, gain_col=None, status_class_col=None):
     """Return HTML for a styled table from a DataFrame. status_class_col
-    (optional) lets the CSS color-class be derived from a different, raw
-    column than the one actually displayed in status_col — e.g. showing
+    (optional) lets the pill color be derived from a different, raw column
+    than the one actually displayed in status_col — e.g. showing
     'Cancelled — never filled' as text while still coloring it via the
     underlying 'ERROR' status. That raw column is used for lookup only and
-    is not rendered as its own visible column."""
+    is not rendered as its own visible column.
+
+    The status column renders as a pill (colored dot + tinted background)
+    rather than plain colored text — reads at a glance the way status does
+    in Linear/Notion, instead of blending into the row."""
     money_cols = money_cols or []
     cols = [c for c in df.columns if c != status_class_col]
     header = "".join(f"<th>{c.replace('_', ' ').title()}</th>" for c in cols)
@@ -437,10 +492,11 @@ def render_table(df, money_cols=None, status_col=None, gain_col=None, status_cla
         for c in cols:
             val = row[c]
             css_class = "num" if c in money_cols else ""
-            if status_col and c == status_col:
+            is_status = bool(status_col) and c == status_col
+            status_val = None
+            if is_status:
                 class_source = row[status_class_col] if status_class_col else val
                 status_val = str(class_source).lower()
-                css_class += f" status-{status_val}"
             blank = val is None or val == '' or pd.isna(val)
             if not blank and hasattr(val, 'strftime'):
                 # Timestamp/datetime/date — every date column in this app is
@@ -457,7 +513,11 @@ def render_table(df, money_cols=None, status_col=None, gain_col=None, status_cla
                     val = f"₹{float(val):,.2f}"
                 except (ValueError, TypeError):
                     pass
-            cells.append(f'<td class="{css_class}">{"" if blank else val}</td>')
+            if is_status and not blank:
+                content = f'<span class="status-pill status-pill-{status_val}">{val}</span>'
+            else:
+                content = "" if blank else val
+            cells.append(f'<td class="{css_class}">{content}</td>')
         rows_html.append(f"<tr>{''.join(cells)}</tr>")
     return f"""
     <div class="ledger-table-wrap">
