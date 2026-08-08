@@ -303,7 +303,9 @@ def page_drilldown():
         st.info("No categories found.")
         return
 
-    category = st.selectbox("Select a category", cat['category_name'].tolist())
+    cat_col, _spacer = st.columns([1, 2])
+    with cat_col:
+        category = st.selectbox("Select a category", cat['category_name'].tolist())
 
     crow = cat[cat['category_name'] == category].iloc[0]
     c1, c2, c3 = st.columns(3)
@@ -517,8 +519,10 @@ def page_needs_review():
             st.warning(_needs_review_reason(row['notes']))
             st.caption(f"Category: {row['category_name']} · Recommended price: {fmt(row['recommended_price'])}")
 
-            symbol = st.text_input("Correct Kite trading symbol", key=f'nr_symbol_{tid}',
-                                   placeholder="e.g. VOLTAMP").strip().upper()
+            symbol_col, _spacer = st.columns([1, 2])
+            with symbol_col:
+                symbol = st.text_input("Correct Kite trading symbol", key=f'nr_symbol_{tid}',
+                                       placeholder="e.g. VOLTAMP").strip().upper()
 
             preview_key = f'nr_preview_{tid}'
             col_preview, col_confirm = st.columns([1, 2])
@@ -565,7 +569,9 @@ def page_classification():
                 st.markdown(theme.kpi_card(row['cap_type'], int(row['count']), tone="accent"), unsafe_allow_html=True)
 
     st.markdown("### Symbol Lookup")
-    sym = st.text_input("Search by NSE symbol or company name (e.g. RELIANCE or Zee)")
+    sym_col, _spacer = st.columns([1, 1])
+    with sym_col:
+        sym = st.text_input("Search by NSE symbol or company name (e.g. RELIANCE or Zee)")
     if sym:
         res = db.lookup_symbol(sym)
         if res.empty:
@@ -630,8 +636,10 @@ def page_settings():
     st.markdown("### Total Portfolio Budget")
     s = db.portfolio_summary()
     with st.form("budget_form"):
-        new_budget = st.number_input("Total budget (₹)", value=float(s['total_budget']),
-                                     min_value=0.0, step=1000.0, format="%.2f")
+        budget_col, _spacer = st.columns([1, 3])
+        with budget_col:
+            new_budget = st.number_input("Total budget (₹)", value=float(s['total_budget']),
+                                         min_value=0.0, step=1000.0, format="%.2f")
         if st.form_submit_button("Update total budget"):
             rows = db.update_total_budget(new_budget)
             st.success(f"Total budget updated to {fmt(new_budget)} ({rows} row).")
@@ -670,9 +678,14 @@ def page_settings():
         options = {f"#{r['trade_id']} {r['stock_name']} ({r['symbol']}) — {fmt(r['invested_amount'])}": r['trade_id']
                    for _, r in open_trades.iterrows()}
         with st.form("close_form"):
-            choice = st.selectbox("Open trade", list(options.keys()))
-            sell_price = st.number_input("Sell price (₹)", min_value=0.0, step=1.0, format="%.2f")
-            sell_date = st.date_input("Sell date", value=datetime.date.today())
+            trade_col, _spacer = st.columns([2, 1])
+            with trade_col:
+                choice = st.selectbox("Open trade", list(options.keys()))
+            price_col, date_col, _spacer = st.columns([1, 1, 2])
+            with price_col:
+                sell_price = st.number_input("Sell price (₹)", min_value=0.0, step=1.0, format="%.2f")
+            with date_col:
+                sell_date = st.date_input("Sell date", value=datetime.date.today())
             if st.form_submit_button("Close trade"):
                 if sell_price <= 0:
                     st.error("Enter a valid sell price.")
@@ -707,7 +720,9 @@ def page_orders():
                 status_options = ['All'] + sorted(odf['status'].dropna().unique().tolist())
                 if st.session_state.get('orders_status_filter') not in status_options:
                     st.session_state['orders_status_filter'] = 'All'
-                status = st.selectbox("Status", status_options, key='orders_status_filter')
+                status_col, _spacer = st.columns([1, 3])
+                with status_col:
+                    status = st.selectbox("Status", status_options, key='orders_status_filter')
                 fdf = odf if status == 'All' else odf[odf['status'] == status]
                 st.caption(f"{len(fdf)} order(s)")
                 cols = [c for c in ['order_timestamp', 'tradingsymbol', 'transaction_type', 'order_type',
@@ -726,7 +741,9 @@ def page_orders():
                 status_options = ['All'] + sorted(gdf['status'].dropna().unique().tolist())
                 if st.session_state.get('gtt_status_filter') not in status_options:
                     st.session_state['gtt_status_filter'] = 'All'
-                status = st.selectbox("Status", status_options, key='gtt_status_filter')
+                status_col, _spacer = st.columns([1, 3])
+                with status_col:
+                    status = st.selectbox("Status", status_options, key='gtt_status_filter')
                 fdf = gdf if status == 'All' else gdf[gdf['status'] == status]
                 st.caption(f"{len(fdf)} GTT trigger(s)")
                 fdf = fdf.copy()
