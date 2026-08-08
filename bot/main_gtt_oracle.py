@@ -160,9 +160,12 @@ def run_for_tenant(tenant, conn):
                 log(f"  [DRY RUN] Would mark {stock} as Closed — sold "
                     f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")
             else:
-                close_trade_in_oracle(conn, buy_oid, datetime.now(IST).date())
+                close_trade_in_oracle(conn, buy_oid, datetime.now(IST).date(),
+                                      sell_price=filled_order.get('avg_price'),
+                                      sell_qty=filled_order['filled_qty'])
             gtt_closed += 1
-            log(f"  {stock} marked Closed — GTT {gtt_st}, sell CONFIRMED filled")
+            log(f"  {stock} marked Closed — GTT {gtt_st}, sell CONFIRMED filled "
+                f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")
         else:
             if not qty or not target or not sell_symbol:
                 log(f"  Cannot recreate GTT for trade #{trade_id} — missing qty/target/symbol")

@@ -15,7 +15,7 @@ Pages:
   - Trades Explorer      filterable, searchable, CSV export
   - Recommendations      every tip the bot has seen, bought or not
   - Needs Review          symbols the bot wouldn't guess — correct + manual retry-buy
-  - Orders               live Kite order book + GTT triggers, filterable
+  - Open Orders          live Kite order book + GTT triggers, filterable
   - Classification       AMFI cap-type lookup
   - Settings & Edits     total budget, category %, manually close a trade
 """
@@ -640,14 +640,19 @@ def page_settings():
     st.markdown("### Category Allocations")
     cat = db.category_status()
     if not cat.empty:
-        category = st.selectbox("Category to edit", cat['category_name'].tolist())
+        cat_col, _spacer = st.columns([1, 2])
+        with cat_col:
+            category = st.selectbox("Category to edit", cat['category_name'].tolist())
         st_df = db.stock_type_status(category)
         crow = cat[cat['category_name'] == category].iloc[0]
         pct_by_cap = {r['cap_type']: r['pct'] for _, r in st_df.iterrows()} if not st_df.empty else {}
         with st.form("cat_form"):
-            ap = st.number_input("Category allocation % of portfolio",
-                                 value=float(crow['allocation_pct']), min_value=0.0, max_value=100.0, step=1.0)
-            cola, colb, colc, cold = st.columns(4)
+            ap_col, _spacer = st.columns([1, 3])
+            with ap_col:
+                ap = st.number_input("Category allocation % of portfolio",
+                                     value=float(crow['allocation_pct']), min_value=0.0, max_value=100.0, step=1.0)
+            st.caption("Max % in a single stock, by cap type")
+            cola, colb, colc, cold, _spacer = st.columns([1, 1, 1, 1, 4])
             lp = cola.number_input("Large Cap %", value=float(pct_by_cap.get('Large Cap', 0)), min_value=0.0, max_value=100.0, step=1.0)
             mp = colb.number_input("Mid Cap %", value=float(pct_by_cap.get('Mid Cap', 0)), min_value=0.0, max_value=100.0, step=1.0)
             sp = colc.number_input("Small Cap %", value=float(pct_by_cap.get('Small Cap', 0)), min_value=0.0, max_value=100.0, step=1.0)
@@ -679,7 +684,7 @@ def page_settings():
 
 
 def page_orders():
-    st.title("Orders")
+    st.title("Open Orders")
     sync_status = kite_data.sync_status()
     if sync_status:
         lines = [f"**{row['account_label']}**: {row['synced_at'].strftime('%Y-%m-%d %H:%M:%S')}" for row in sync_status]
@@ -745,7 +750,7 @@ PAGES = [
     "Trades Explorer",
     "Recommendations",
     "Needs Review",
-    "Orders",
+    "Open Orders",
     "Classification",
     "Settings & Edits",
 ]
@@ -784,7 +789,7 @@ def main():
             page_recommendations()
         elif page == "Needs Review":
             page_needs_review()
-        elif page == "Orders":
+        elif page == "Open Orders":
             page_orders()
         elif page == "Classification":
             page_classification()

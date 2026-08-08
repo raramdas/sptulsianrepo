@@ -169,9 +169,12 @@ def run():
                 log(f"  [DRY RUN] Would mark {stock} as Closed — sold "
                     f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")
             else:
-                close_trade_in_oracle(buy_oid, datetime.now(IST).date())
+                close_trade_in_oracle(buy_oid, datetime.now(IST).date(),
+                                      sell_price=filled_order.get('avg_price'),
+                                      sell_qty=filled_order['filled_qty'])
             gtt_closed += 1
-            log(f"  {stock} marked Closed — GTT {gtt_st}, sell CONFIRMED filled")
+            log(f"  {stock} marked Closed — GTT {gtt_st}, sell CONFIRMED filled "
+                f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")
         else:
             # GTT ended (triggered without a fill, cancelled, deleted, or
             # expired) with nothing actually sold — recreate at the same

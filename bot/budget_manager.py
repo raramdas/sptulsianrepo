@@ -293,20 +293,38 @@ def mark_trade_error_oracle(conn, trade_id, message):
         log(f"  mark_trade_error_oracle error: {e}")
 
 
-def close_trade_in_oracle(conn, buy_order_id, target_met_date):
+def close_trade_in_oracle(conn, buy_order_id, target_met_date, sell_price=None, sell_qty=None):
     """Mark a trade as Closed when its GTT triggers — this frees up the
-    category/stock-type budget since the views only sum status='Open'."""
+    category/stock-type budget since the views only sum status='Open'.
+
+    sell_price/sell_qty (from the confirmed fill main_gtt_oracle.py already
+    verified before calling this) are recorded too, with my_gain_loss
+    computed against the trade's own my_buy_price. Without these, the row
+    closes with status='Closed' but every sell-side figure stays NULL,
+    leaving Performance's realized P&L and cumulative chart empty (mirrors
+    the same fix applied to the root single-tenant budget_manager.py)."""
     if not conn:
         log("  Oracle close skipped — no connection")
         return
     try:
         cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE trades
-            SET status = 'Closed', target_met = 'Yes', target_met_date = :target_met_date,
-                updated_at = SYSTIMESTAMP
-            WHERE buy_order_id = :buy_order_id AND status = 'Open'
-        """, {'buy_order_id': buy_order_id, 'target_met_date': target_met_date})
+        if sell_price is not None and sell_qty is not None:
+            cursor.execute("""
+                UPDATE trades
+                SET status = 'Closed', target_met = 'Yes', target_met_date = :target_met_date,
+                    my_sell_date = :target_met_date, my_sell_price = :sell_price, my_sell_qty = :sell_qty,
+                    my_gain_loss = (:sell_price - my_buy_price) * :sell_qty,
+                    updated_at = SYSTIMESTAMP
+                WHERE buy_order_id = :buy_order_id AND status = 'Open'
+            """, {'buy_order_id': buy_order_id, 'target_met_date': target_met_date,
+                  'sell_price': sell_price, 'sell_qty': sell_qty})
+        else:
+            cursor.execute("""
+                UPDATE trades
+                SET status = 'Closed', target_met = 'Yes', target_met_date = :target_met_date,
+                    updated_at = SYSTIMESTAMP
+                WHERE buy_order_id = :buy_order_id AND status = 'Open'
+            """, {'buy_order_id': buy_order_id, 'target_met_date': target_met_date})
         conn.commit()
         log(f"  Trade closed for buy_order_id={buy_order_id} (rows updated: {cursor.rowcount})")
         cursor.close()
