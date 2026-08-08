@@ -25,6 +25,7 @@ import datetime
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
+from streamlit_cookies_manager import EncryptedCookieManager
 
 load_dotenv('/home/ubuntu/.env')
 
@@ -38,6 +39,7 @@ theme.inject()
 # ── Simple auth with brute-force protection ──────────────────────
 MAX_ATTEMPTS = 5
 LOCKOUT_SECS = 300
+REMEMBER_ME_DAYS = 30
 
 def load_users():
     raw = os.environ.get('DASH_USERS', 'admin:changeme')
@@ -50,9 +52,36 @@ def load_users():
 
 USERS = load_users()
 
+# Encrypted browser cookie so login survives iOS reclaiming a home-screen
+# web app's memory (Streamlit's session_state is in-memory only and gets
+# wiped whenever that happens — a plain "add to home screen" bookmark is
+# not a native app, so this is the practical equivalent of "stay signed
+# in," not true biometric Face ID, which would need a native app or a
+# much larger WebAuthn build). The cookie itself is encrypted with
+# DASH_SESSION_SECRET — unreadable/unforgeable without it — and only ever
+# holds a username + expiry, never a password.
+COOKIE_SECRET = os.environ.get('DASH_SESSION_SECRET', 'insecure-default-change-me')
+cookies = EncryptedCookieManager(prefix="capital_ledger/", password=COOKIE_SECRET)
+
+
 def check_login():
+    if not cookies.ready():
+        st.stop()  # first render round-trips through a hidden component to sync cookies
+
     if st.session_state.get('authenticated'):
         return True
+
+    # Auto-login from a valid remember-me cookie, if present
+    saved_user = cookies.get('user')
+    saved_exp = cookies.get('exp')
+    if saved_user and saved_exp:
+        try:
+            if float(saved_exp) > time.time() and saved_user in USERS:
+                st.session_state['authenticated'] = True
+                st.session_state['user'] = saved_user
+                return True
+        except ValueError:
+            pass
 
     if 'failed_attempts' not in st.session_state:
         st.session_state['failed_attempts'] = 0
@@ -73,12 +102,17 @@ def check_login():
         with st.form("login"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
+            remember = st.checkbox("Keep me signed in on this device", value=True)
             submitted = st.form_submit_button("Sign in")
             if submitted:
                 if USERS.get(username) == password:
                     st.session_state['authenticated'] = True
                     st.session_state['user'] = username
                     st.session_state['failed_attempts'] = 0
+                    if remember:
+                        cookies['user'] = username
+                        cookies['exp'] = str(now + REMEMBER_ME_DAYS * 86400)
+                        cookies.save()
                     st.rerun()
                 else:
                     st.session_state['failed_attempts'] += 1
@@ -682,6 +716,11 @@ def main():
     page = st.sidebar.radio("Navigate", PAGES, label_visibility="collapsed")
     if st.sidebar.button("Sign out"):
         st.session_state.clear()
+        if 'user' in cookies:
+            del cookies['user']
+        if 'exp' in cookies:
+            del cookies['exp']
+        cookies.save()
         st.rerun()
 
     st.sidebar.divider()
