@@ -327,9 +327,52 @@ def page_drilldown():
                 unsafe_allow_html=True
             )
 
-    st.markdown(f"### Trades in {category}")
-    tdf = db.trades(category=category)
-    _render_trades_table(tdf)
+    # Full (unfiltered) open trades needed here — tag_holdings_with_category
+    # splits a symbol's holding across categories in proportion to Oracle's
+    # recorded quantity per category, which requires seeing every category's
+    # trades, not just this one.
+    all_open_trades = db.trades(status='Open')
+    cat_open_trades = all_open_trades[all_open_trades['category_name'] == category] if not all_open_trades.empty else all_open_trades
+
+    st.markdown(f"### Holdings — {category}")
+    try:
+        tagged = kite_data.tag_holdings_with_category(all_open_trades)
+        cat_holdings = tagged[tagged['category_name'] == category]
+
+        unrealized_by_cat = kite_data.unrealized_pnl_by_category(cat_open_trades)
+        unrealized_pnl = float(unrealized_by_cat.iloc[0]['unrealized_pnl']) if not unrealized_by_cat.empty else 0.0
+        unpriced = int(unrealized_by_cat.iloc[0]['unpriced_count']) if not unrealized_by_cat.empty else 0
+
+        realized_by_cat = db.category_pnl_breakdown_fy()
+        cat_realized = realized_by_cat[realized_by_cat['category_name'] == category] if not realized_by_cat.empty else realized_by_cat
+        realized_pnl = float(cat_realized.iloc[0]['realized_pnl']) if not cat_realized.empty else 0.0
+
+        p1, p2, p3 = st.columns(3)
+        with p1:
+            tone = "positive" if realized_pnl >= 0 else "negative"
+            st.markdown(theme.kpi_card("Realized P&L (FY)", fmt(realized_pnl), tone=tone), unsafe_allow_html=True)
+        with p2:
+            tone = "positive" if unrealized_pnl >= 0 else "negative"
+            st.markdown(theme.kpi_card("Unrealized P&L (live)", fmt(unrealized_pnl), tone=tone), unsafe_allow_html=True)
+            if unpriced:
+                st.caption(f"{unpriced} open trade(s) couldn't be priced (no matching live quote)")
+        with p3:
+            total_pnl = realized_pnl + unrealized_pnl
+            tone = "positive" if total_pnl >= 0 else "negative"
+            st.markdown(theme.kpi_card("Total P&L (FY Realized + Live Unrealized)", fmt(total_pnl), tone=tone), unsafe_allow_html=True)
+
+        if cat_holdings.empty:
+            st.info("No live holdings mapped to this category.")
+        else:
+            display_cols = ['symbol', 'account_label', 'quantity', 'average_price', 'last_price', 'current_value', 'pnl']
+            money_cols = ['average_cost', 'last_price', 'current_value', 'pnl']
+            d = cat_holdings[display_cols].rename(columns={'average_price': 'average_cost', 'account_label': 'account'}).copy()
+            d['quantity'] = d['quantity'].astype(int)
+            st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
+        st.caption("From the last Kite sync — click 'Sync Kite Data' on Overview to refresh. For full trade "
+                   "history in this category (including closed/error/skipped), use Trades Explorer.")
+    except Exception as e:
+        st.warning(f"Couldn't read the Kite snapshot for holdings — showing Oracle-only figures above. ({e})")
 
 
 def page_performance():
