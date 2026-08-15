@@ -529,6 +529,19 @@ def open_trades_for_targets():
     """)
 
 
+def open_trades_for_capture():
+    """ALL open trades (no 2-most-recent-days restriction) — used to match
+    SPTulsian-captured rows (spt_capture.py / capture_api.py) against every
+    live position, not just the freshest ones the Set Targets page shows."""
+    return _df("""
+        SELECT trade_id, category_name, stock_name, buy_date,
+               target_price, timeframe, have_interest
+        FROM trades
+        WHERE status = 'Open'
+        ORDER BY buy_date DESC, trade_id DESC
+    """)
+
+
 def needs_review_trades():
     """Trades flagged NEEDS_REVIEW — the buy bot refused to guess a symbol
     match rather than risk buying the wrong stock. Most recent first."""
