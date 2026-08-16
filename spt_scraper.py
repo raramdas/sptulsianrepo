@@ -2,35 +2,61 @@
 """
 spt_scraper.py — scrapes Type/Target/Timeframe/Have Interest from sptulsian.com.
 
-Two separate interfaces live in this file:
+The VM cannot reach sptulsian.com directly — CloudFront's WAF rejects
+datacenter IP ranges at the edge (HTTP 403), before the request reaches the
+origin. All traffic here therefore goes through a Cloudflare WARP SOCKS5
+proxy, scoped to this module's session only; see SPTULSIAN_PROXY below.
 
-1. The ORIGINAL cron-facing stub (scrape_spt_stock / get_spt_page /
-   quit_spt_driver) — still fully disabled and untouched. The OCI VM's IP is
-   blocked by CloudFront on sptulsian.com, so main_recommend.py's automated
-   9:30am run must keep no-op'ing here rather than attempting a real request.
-   Left exactly as-is so the live cron path is never at risk.
+Two interfaces live in this file:
 
-2. NEW capture functions (login_session / scrape_category /
-   scrape_all_categories) — used by spt_capture.py, runnable either by hand
-   from a laptop or on the VM itself via the WARP proxy (SPTULSIAN_PROXY,
-   see below). Deliberately NOT imported from config.py (which hardcodes
-   /home/ubuntu/.env and requires a full production environment) so this
-   half of the file works standalone on any machine with just
-   SPT_USERNAME/SPT_PASSWORD set.
+1. scrape_spt_stock() — the per-tip lookup main_recommend.py's 9:30am cron
+   calls. Logs in and scrapes all sections once per process, then serves
+   every tip from that cache. Returns blanks (never raises, never returns
+   stale data) if the scrape fails, so a target lookup cannot block the
+   recommendation run; the failure surfaces via the liveness watermark that
+   spt_watchdog.py alerts on.
 
-The portal serves its six sections through two different backend
-controllers, so two parsing strategies are needed — see scrape_category().
+2. login_session / scrape_category / scrape_all_categories — the lower-level
+   capture API, used by spt_capture.py for manual review-then-save runs.
 
-Test the capture path independently:
-    python3 spt_capture.py
+Deliberately NOT imported from config.py (which hardcodes /home/ubuntu/.env
+and requires a full production environment) so this module stays usable on
+any machine with just SPT_USERNAME/SPT_PASSWORD set.
+
+The portal serves its sections through two different backend controllers, so
+two parsing strategies are needed — see scrape_category().
+
+Test independently:
+    python3 spt_capture.py --dry-run
 """
 import os
 import re
+import json
 import time
+from datetime import datetime, timezone
+
 import requests
 from bs4 import BeautifulSoup
 
-# ── Original cron-facing stub (unchanged, still disabled) ─────────────────
+# Written only after a genuinely parsed scrape; spt_watchdog.py alerts when
+# it goes stale. Overridable via SPT_WATERMARK_PATH for testing.
+DEFAULT_WATERMARK_PATH = '/home/ubuntu/spt_scrape_watermark.json'
+
+
+class SPTLoginError(Exception):
+    pass
+
+
+class SPTScrapeError(Exception):
+    pass
+
+
+def _clog(msg):
+    """Plain timestamped print — deliberately not config.log, so this module
+    stays importable without a full production environment."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+# ── Section map ──────────────────────────────────────────────────────────
 
 # SPTulsian section URL map (also used by the new capture functions below).
 #
@@ -57,22 +83,137 @@ SPT_EXCLUDED_SECTIONS = {
 
 
 def get_spt_page():
-    """Stub — returns None until IP whitelisting is confirmed with SPTulsian."""
+    """Retained for backwards compatibility; the per-section fetch now happens
+    inside scrape_category()."""
     return None
 
 
-def scrape_spt_stock(stock_name, category):
-    """Stub — returns empty result until scraping is re-enabled. Called by
-    main_recommend.py's cron run; must stay a safe no-op (see module docstring)."""
-    return {'type': '', 'target': '', 'timeframe': '', 'have_interest': ''}
+# One login + one full scrape per process, reused across every tip in the run.
+_run_cache = None
+
+
+def _lookup_index(results):
+    """(category, stock) -> row, preferring a still-running call. Mirrors the
+    ranking in capture_api.build_matches; kept deliberately category-scoped,
+    since the same stock carries different targets in different sections."""
+    index = {}
+    for category_name, r in results.items():
+        cat_key = _norm_name(category_name)
+        for row in r.get('rows', []):
+            key = _norm_name(row['stock_name'])
+            if not key:
+                continue
+            prev = index.get((cat_key, key))
+            if prev is None or _row_rank(row) > _row_rank(prev):
+                index[(cat_key, key)] = row
+    return index
+
+
+def _norm_name(s):
+    return re.sub(r'\s+', ' ', (s or '').strip()).upper()
+
+
+def _row_rank(row):
+    return (0 if row.get('closed') else 1,
+            1 if row.get('source') == 'active' else 0)
+
+
+def scrape_spt_stock(stock_name, category, log=_clog):
+    """Look up one tip's Type/Target/Timeframe/Have-Interest.
+
+    Called per-tip by main_recommend.py's cron run, so the login and the
+    six-section scrape happen once and are cached for the rest of the process.
+
+    Returns blanks rather than raising if anything fails: recording the
+    recommendation and resolving its symbol matters more than the target, and
+    a target can always be filled in later from the dashboard. The failure is
+    still made loud — it is logged, and the liveness watermark is NOT written,
+    which is what spt_watchdog.py alerts on. Never returns a stale-but-
+    plausible-looking result on failure."""
+    global _run_cache
+
+    blank = {'type': '', 'target': '', 'timeframe': '', 'have_interest': ''}
+
+    if _run_cache is None:
+        username = os.environ.get('SPT_USERNAME', '')
+        password = os.environ.get('SPT_PASSWORD', '')
+        try:
+            session = login_session(username, password, log=log)
+            results = scrape_all_categories(session, log=log)
+        except (SPTLoginError, SPTScrapeError, requests.RequestException) as e:
+            log(f"  SPTulsian scrape unavailable ({e}) — continuing without "
+                f"target/timeframe; spt_watchdog.py will flag this")
+            _run_cache = {'index': {}, 'ok': False}
+            return blank
+
+        ok_sections = [c for c, r in results.items() if not r.get('error')]
+        total_rows = sum(len(r.get('rows', [])) for r in results.values())
+        _run_cache = {'index': _lookup_index(results), 'ok': bool(ok_sections)}
+
+        if ok_sections:
+            # Watermark ONLY on a genuinely parsed scrape — never on a mere
+            # attempt. That is the whole point: a metric a failed fetch cannot
+            # satisfy. Judging freshness off the newest call instead would
+            # false-alarm on a genuinely quiet week.
+            write_watermark(sections_ok=ok_sections, rows=total_rows, log=log)
+        else:
+            log("  SPTulsian: no section could be read — watermark not written")
+
+    if not _run_cache['ok']:
+        return blank
+
+    row = _run_cache['index'].get((_norm_name(category), _norm_name(stock_name)))
+    if row is None:
+        log(f"  SPTulsian: no call found for '{stock_name}' in '{category}'")
+        return blank
+    if row.get('closed'):
+        # A call SPTulsian has already exited must not set a target on a
+        # position being opened right now.
+        log(f"  SPTulsian: only a CLOSED call found for '{stock_name}' — leaving target blank")
+        return blank
+
+    return {
+        'type': '',  # cap type comes from AMFI via get_stock_cap_type(), not from here
+        'target': row.get('target_price') or '',
+        'timeframe': row.get('timeframe') or '',
+        'have_interest': 'Have Interest' if row.get('have_interest') else 'No Interest',
+    }
+
+
+def write_watermark(sections_ok, rows, path=None, log=_clog):
+    """Record that a scrape genuinely succeeded. Read by spt_watchdog.py."""
+    path = path or os.environ.get('SPT_WATERMARK_PATH', DEFAULT_WATERMARK_PATH)
+    payload = {
+        'last_success': datetime.now(timezone.utc).isoformat(),
+        'sections_ok': list(sections_ok),
+        'rows': rows,
+    }
+    try:
+        with open(path, 'w') as f:
+            json.dump(payload, f)
+        log(f"  SPTulsian watermark written: {len(sections_ok)} section(s), {rows} row(s)")
+    except OSError as e:
+        log(f"  WARNING: could not write watermark to {path}: {e}")
+
+
+def read_watermark(path=None):
+    """Returns the watermark dict, or None if it has never been written."""
+    path = path or os.environ.get('SPT_WATERMARK_PATH', DEFAULT_WATERMARK_PATH)
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 def quit_spt_driver():
-    """No-op until SPTulsian scraping is re-enabled."""
-    pass
+    """Retained so main_recommend.py's teardown call stays valid. Clears the
+    per-run cache so a long-lived process re-logs-in on its next run."""
+    global _run_cache
+    _run_cache = None
 
 
-# ── New: manual-capture functions (used only by spt_capture.py) ───────────
+# ── Lower-level capture API ──────────────────────────────────────────────
 
 BASE_URL = 'https://www.sptulsian.com'
 _UA = ('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
@@ -112,19 +253,6 @@ _EXIT_RE = re.compile(
 SPTULSIAN_PROXY = os.environ.get('SPTULSIAN_PROXY', '')
 
 
-class SPTLoginError(Exception):
-    pass
-
-
-class SPTScrapeError(Exception):
-    pass
-
-
-def _clog(msg):
-    """Plain timestamped print — deliberately not config.log (see module docstring)."""
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
-
-
 def _clean_float(val):
     """'1,935' / '412' -> float. Returns None if unparseable."""
     if val is None:
@@ -138,11 +266,16 @@ def _clean_float(val):
 def build_session():
     """A requests.Session with the scraper's UA, and the WARP SOCKS5 proxy
     attached IF SPTULSIAN_PROXY is set. Proxy scope stops here on purpose —
-    no other module's traffic is routed through it (see SPTULSIAN_PROXY)."""
+    no other module's traffic is routed through it (see SPTULSIAN_PROXY).
+
+    Read from the environment at call time, not import time: config.py loads
+    /home/ubuntu/.env, and depending on import order that can happen after
+    this module is first imported."""
+    proxy = os.environ.get('SPTULSIAN_PROXY', SPTULSIAN_PROXY)
     session = requests.Session()
     session.headers.update({'User-Agent': _UA})
-    if SPTULSIAN_PROXY:
-        session.proxies = {'http': SPTULSIAN_PROXY, 'https': SPTULSIAN_PROXY}
+    if proxy:
+        session.proxies = {'http': proxy, 'https': proxy}
     return session
 
 

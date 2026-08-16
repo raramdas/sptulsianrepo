@@ -20,8 +20,12 @@ from budget_manager import get_stock_cap_type, insert_trade_to_oracle, close_ora
 
 
 def process_tip(tip, enctoken):
-    # Scrape Type, Target, Timeframe, Have Interest from SPTulsian (currently disabled — returns blanks)
-    spt = scrape_spt_stock(tip['stock'], tip.get('category', ''))
+    # Target/Timeframe/Have-Interest from SPTulsian, via the WARP proxy. Logs
+    # in and scrapes once per run, then serves each tip from that cache.
+    # Returns blanks if the scrape fails or only a closed call matches — a
+    # missing target never blocks recording the recommendation, and
+    # spt_watchdog.py alerts separately if the scraper has gone dark.
+    spt = scrape_spt_stock(tip['stock'], tip.get('category', ''), log=log)
     tip['type']          = spt['type']
     tip['target']        = spt['target']
     tip['timeframe']     = spt['timeframe']
