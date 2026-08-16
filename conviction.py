@@ -569,24 +569,48 @@ def score_governance(ev):
 # ── Hard gates, composite, verdict ───────────────────────────────────────
 
 def hard_gates(ev, layers):
-    """Conditions that flag a recommendation regardless of its score. These
-    are reported, never used to silently drop a call — the human sees both
-    the recommendation and the reason to decline it."""
-    gates = []
+    """Returns (gates, warnings).
+
+    A GATE forces recommend-reject; a WARNING is surfaced but leaves the
+    verdict to the score. The split is deliberate and was tuned against the
+    live portfolio, where over-eager gates produced obvious false positives:
+
+    - Beneish is a WARNING, never a gate. Its sales-growth term (SGI) pushes
+      fast-growing companies over the -1.78 threshold, and on this portfolio
+      it flagged BEL, CG Power, Solar Industries and Mazagon Dock — reputable
+      high-growth defence and power names. A gate that rejects those trains
+      the reader to ignore the tool.
+
+    - Altman gates only in DEEP distress (<3.0), not merely below the 4.15
+      grey-zone line. Vodafone Idea reads 0.57 and is unambiguous; a
+      capital-intensive manufacturer sitting at 3.8 is not, and Z''-EM runs
+      structurally low for them.
+
+    Neither is used to silently drop a call: the reason is always reported
+    alongside the recommendation.
+    """
+    gates, warns = [], []
 
     if not is_financial(ev):
         z = altman_z_em(ev)
-        if z is not None and z < 4.15:
-            gates.append(f'Altman Z"={z:.2f} — distress zone (<4.15)')
+        if z is not None:
+            if z < 3.0:
+                gates.append(f'Altman Z"={z:.2f} — deep distress (<3.0)')
+            elif z < 4.15:
+                warns.append(f'Altman Z"={z:.2f} — grey zone (<4.15), not deep distress')
         m = beneish_m(ev)
         if m is not None and m > -1.78:
-            gates.append(f'Beneish M={m:.2f} — earnings-manipulation flag (>-1.78)')
+            warns.append(f'Beneish M={m:.2f} — above -1.78; often a false positive on '
+                         f'high sales growth, check the growth rate before reading it '
+                         f'as an accounting concern')
 
     stage = (ev.get('asm_stage') or '')
     if 'GSM' in stage.upper():
         gates.append(f'Under NSE GSM surveillance ({stage})')
     elif stage and any(x in stage for x in ('III', 'IV')):
         gates.append(f'Under NSE ASM {stage}')
+    elif stage:
+        warns.append(f'Under NSE ASM {stage}')
 
     for c in layers.get('technical', []):
         if c['name'] == 'Liquidity' and c['status'] == OK:
@@ -594,10 +618,11 @@ def hard_gates(ev, layers):
                 cr = float(c['detail'].split('Rs')[1].split('cr')[0])
                 if cr < LIQUIDITY_FLOOR_CR:
                     gates.append(f'Illiquid: Rs {cr:.2f} cr/day median traded value '
-                                 f'(floor Rs {LIQUIDITY_FLOOR_CR:.1f} cr)')
+                                 f'(floor Rs {LIQUIDITY_FLOOR_CR:.1f} cr) — a GTT may '
+                                 f'not fill at the target')
             except (IndexError, ValueError):
                 pass
-    return gates
+    return gates, warns
 
 
 def score_symbol(symbol, spt_target=None, log=_log):
@@ -646,22 +671,25 @@ def score_symbol(symbol, spt_target=None, log=_log):
     score = round(total_awarded / total_attempted * 100, 1) if total_attempted else None
     evidence_pct = round(total_attempted, 1)
 
-    gates = hard_gates(ev, layers)
+    gates, warns = hard_gates(ev, layers)
 
-    if score is None:
-        tier, tier_label = 'NA', 'No evidence'
+    if score is None or evidence_pct < MIN_EVIDENCE_PCT:
+        # Below the evidence floor the composite is computed off so few
+        # checks that it is noise — publishing e.g. "100/100" from a single
+        # surviving governance check would be actively misleading, so the
+        # score is withheld rather than shown.
+        tier, tier_label = 'NA', 'Insufficient evidence'
         verdict = 'INSUFFICIENT EVIDENCE'
-        reasons = ['No layer could be assessed.']
+        reasons = ([f'Only {evidence_pct:.0f} of 100 points could be assessed '
+                    f'(floor {MIN_EVIDENCE_PCT}) — too little to judge either way.']
+                   if score is not None else ['No layer could be assessed.'])
+        score = None
     else:
         tier, tier_label = next((t, lbl) for floor, t, lbl in TIERS if score >= floor)
         reasons = []
         if gates:
             verdict = 'RECOMMEND REJECT'
             reasons = list(gates)
-        elif evidence_pct < MIN_EVIDENCE_PCT:
-            verdict = 'INSUFFICIENT EVIDENCE'
-            reasons = [f'Only {evidence_pct:.0f} of 100 points could be assessed '
-                       f'(floor {MIN_EVIDENCE_PCT}).']
         elif score < ACCEPT_FLOOR:
             verdict = 'RECOMMEND REJECT'
             reasons = [f'Score {score:.0f} is below the {ACCEPT_FLOOR}-point floor.']
@@ -677,6 +705,7 @@ def score_symbol(symbol, spt_target=None, log=_log):
         'verdict': verdict,
         'reasons': reasons,
         'gates': gates,
+        'warnings': warns,
         'is_financial': is_financial(ev),
         'sector': (ev.get('info') or {}).get('sector'),
         'layers': layer_summary,
@@ -697,6 +726,8 @@ def format_report(result):
                                                  if s['is_financial'] else ""))
     for reason in s['reasons']:
         out.append(f"  ! {reason}")
+    for w in s.get('warnings', []):
+        out.append(f"  ~ warning: {w}")
     for name, layer in s['layers'].items():
         pct = 'not assessed' if layer['pct'] is None else f"quality {layer['pct']:.0f}%"
         out.append(f"  {name:13s} {layer['awarded']:5.1f}/{layer['attempted']:<4.1f} "
