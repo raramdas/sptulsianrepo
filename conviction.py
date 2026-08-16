@@ -172,10 +172,23 @@ def fetch_nse_surveillance(log=_log):
         return None
 
 
+_evidence_cache = {}
+
+
 def gather_evidence(symbol, spt_target=None, log=_log):
     """Pull everything the layers need for one symbol. Never raises: each
-    piece independently degrades to None."""
+    piece independently degrades to None.
+
+    Cached per process by symbol — the portfolio holds several lots of the
+    same stock, and the network fetch dominates runtime. spt_target is not
+    part of the key: it is not fetched, only compared, so it is overlaid on
+    the cached evidence."""
     import yfinance as yf
+
+    if symbol in _evidence_cache:
+        ev = dict(_evidence_cache[symbol])
+        ev['spt_target'] = spt_target
+        return ev
 
     ev = {'symbol': symbol, 'spt_target': spt_target, 'info': {},
           'financials': None, 'balance': None, 'cashflow': None,
@@ -207,6 +220,7 @@ def gather_evidence(symbol, spt_target=None, log=_log):
         ev['asm_checked'] = True
         ev['asm_stage'] = stages.get(symbol.upper())
 
+    _evidence_cache[symbol] = ev
     return ev
 
 
