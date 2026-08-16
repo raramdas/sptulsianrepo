@@ -1,103 +1,171 @@
-# StockBot — Multi-Tenant Automated Stock Tip Trading System
+# Stockbot / Capital Ledger
 
-Automates buying/selling Indian equities based on a daily SPTulsian advisory
-email, via Zerodha Kite, with budget-aware allocation across categories and
-market-cap types (Large/Mid/Small/Micro, per AMFI classification). Supports
-multiple independent tenants, each with their own Kite account and fully
-isolated Oracle database schema.
+Automates trading Indian equities on SPTulsian advisory calls, via Zerodha
+Kite, with budget-aware position sizing and a full ledger of what it did.
 
-## Structure
+📄 **[ARCHITECTURE.md](ARCHITECTURE.md)** ([PDF](ARCHITECTURE.pdf)) — functional
+and technical design, failure handling, and the reasoning behind the
+non-obvious parts. Read that before changing anything load-bearing.
 
-```
-stockbot/
-├── bot/                    # Core automation (multi-tenant aware)
-│   ├── config.py           # Shared config: Oracle admin conn, Gmail, constants
-│   ├── crypto_utils.py     # Encrypt/decrypt tenant secrets (Fernet)
-│   ├── tenant_manager.py   # Discovers active tenants, opens per-tenant connections
-│   ├── kite_client.py      # Kite auth, symbol resolution, pricing, orders, GTT
-│   ├── email_reader.py     # Parses the shared daily advisory email
-│   ├── spt_scraper.py      # SPTulsian site scraping (currently disabled)
-│   ├── order_status.py     # Kite order/holdings lookup
-│   ├── budget_manager.py   # Category/stock-type budget checks (per-tenant)
-│   ├── main.py             # Buy bot — loops over all active tenants
-│   └── main_gtt_oracle.py  # Sell/GTT bot — loops over all active tenants
-│
-├── provisioning/           # Tenant onboarding (run manually, once per new tenant)
-│   ├── setup_shared_schema.py      # One-time: creates tenant_config + recommendations
-│   ├── tenant_schema_template.py   # DDL template for a single tenant's schema
-│   ├── provision_tenant.py         # Creates a new tenant (interactive)
-│   ├── provision_from_env.py       # Creates a new tenant using .env credentials
-│   ├── generate_master_key.py      # One-time: generates the encryption master key
-│   └── crypto_utils.py
-│
-├── dashboard/               # Streamlit dashboard ("Capital Ledger" design)
-│   ├── app.py
-│   ├── db.py
-│   ├── theme.py
-│   ├── requirements.txt
-│   ├── run_dashboard.sh
-│   ├── DEPLOYMENT_GUIDE.md  # Domain + Caddy HTTPS + systemd setup
-│   └── .streamlit/config.toml
-│
-└── tests/                   # Logic validated against SQLite mocks
-    ├── test_dashboard_logic.py
-    └── test_write_operations.py
-```
+---
 
-## Architecture
+## How it runs
 
-**Multi-tenant isolation: schema-per-tenant, not row-level.** Each tenant gets
-their own Oracle DB user/schema (`trades`, `portfolio_budget`,
-`category_allocation`, budget views) — no `tenant_id` column anywhere. A bug
-or bad query for one tenant cannot structurally reach another tenant's data,
-enforced by the database engine itself.
+Four scheduled jobs on the VM. All cron times are **UTC**; the VM clock is UTC
+and IST is UTC+5:30.
 
-**Shared data** (one ADMIN schema): `tenant_config` (encrypted credentials
-per tenant), `recommendations` (planned — shared advisory feed),
-`stock_cap_classification` (AMFI market-cap reference data, refreshed every
-~6 months).
+| Job | UTC | IST | What it does |
+|---|---|---|---|
+| `main_recommend.py` | `0 4` | 09:30 | Parse the advisory email, resolve symbols, scrape targets. **No orders.** |
+| `spt_watchdog.py` | `15 5` | 10:45 | Alarm if the scraper has gone dark |
+| `main.py` | `30 5` | 11:00 | Price, size against budget, place real buy orders |
+| `main_gtt_oracle.py` | `30 10` | 16:00 | Place GTT sells; close trades on confirmed fills |
 
-**Secrets**: every tenant's Kite login, Kite TOTP secret, and own DB password
-are Fernet-encrypted in `tenant_config`. The one master key lives only in
-`.env` on the server — never in the database, never in this repo.
+The 90-minute gap between recommend and buy is deliberate: it is the window in
+which a human can fix a mis-resolved ticker **before** money moves. A symbol the
+bot cannot resolve confidently becomes `NEEDS_REVIEW` and is never bought on a
+guess.
 
-## Setup (new environment)
+Run on demand:
 
 ```bash
-# 1. One-time: generate the master encryption key
-python3 provisioning/generate_master_key.py
-# add the printed key to .env as MASTER_ENCRYPTION_KEY=...
-
-# 2. One-time: create the shared/control schema
-python3 provisioning/setup_shared_schema.py
-
-# 3. Provision each tenant
-python3 provisioning/provision_from_env.py "Tenant Name" --budget 200000
-
-# 4. Run the bots (loops over all active tenants automatically)
-python3 bot/main.py            # buy bot, ~9:20 AM
-python3 bot/main_gtt_oracle.py # GTT/sell bot, ~4:00 PM
-
-# 5. Dashboard
-cd dashboard && pip3 install -r requirements.txt
-streamlit run app.py
+python3 main_conviction.py --all-open   # score positions on public evidence
+python3 spt_capture.py --dry-run        # preview scraped targets, then save
+python3 spt_watchdog.py --check-only    # health check, never sends mail
 ```
 
-## Required `.env` variables
+## Layout
 
 ```
-KITE_API_KEY=...
-KITE_API_SECRET=...
-GMAIL_USER=...
-GMAIL_APP_PASSWORD=...
-ORACLE_USER=...              # ADMIN schema (shared/control)
-ORACLE_PASSWORD=...
-ORACLE_DSN=...
-ORACLE_WALLET_DIR=...
-ORACLE_WALLET_PASSWORD=...
-MASTER_ENCRYPTION_KEY=...    # from generate_master_key.py
-DASH_USERS=user:pass,...     # dashboard login
+.                          # the live system — this is what cron runs
+├── main_recommend.py      # Phase 1: symbols + targets, no orders
+├── main.py                # Phase 2: price, size, buy
+├── main_gtt_oracle.py     # Phase 3: GTT sells, confirm fills, close
+├── main_conviction.py     # Evidence scoring (display only)
+├── spt_watchdog.py        # Liveness alarm for the scraper
+├── spt_capture.py         # Manual review-then-save of scraped targets
+├── conviction.py          # Four-layer scoring engine
+├── spt_scraper.py         # Portal login + two parsing strategies
+├── budget_manager.py      # Budget policy; all TRADES reads/writes
+├── kite_client.py         # Kite auth, symbol resolution, orders, GTTs
+├── email_reader.py        # Gmail IMAP -> tips
+├── config.py              # Env, credentials, KITE_ACCOUNT switch
+│
+├── dashboard/             # Streamlit UI ("Capital Ledger")
+│   ├── app.py             #   pages
+│   ├── db.py              #   Oracle access
+│   ├── kite_data.py       #   multi-account sync, retry-buy
+│   ├── capture_api.py     #   authenticated endpoint for spt_capture.py
+│   └── theme.py           #   CSS design system
+│
+├── bot/                   # Multi-tenant variant — NOT currently scheduled
+├── provisioning/          # Tenant onboarding for the bot/ tree
+└── tests/                 # Logic validated against SQLite mocks
 ```
 
-Per-tenant Kite/DB credentials are NOT in `.env` — they live encrypted in
-`tenant_config`, added via the provisioning scripts.
+`bot/` is a multi-tenant version (schema-per-tenant, encrypted per-tenant
+credentials) that is not in the live crontab. The scheduled system is the
+single-tenant root tree. Keep `bot/` in sync when changing shared modules, or
+it will silently diverge.
+
+## Deploy
+
+Two directories on the VM track the same repo: `/home/ubuntu/stock_bot_v4`
+(cron) and `/home/ubuntu/stockbot` (dashboard).
+
+```bash
+git add -A && git commit && git push
+ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
+  cd /home/ubuntu/stock_bot_v4 && git pull -q
+  cd /home/ubuntu/stockbot     && git pull -q
+  sudo systemctl restart stockbot-dashboard'
+```
+
+## Health check
+
+```bash
+ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
+  curl -s ifconfig.me; echo                                    # MUST be 140.245.226.35
+  curl -s --socks5-hostname 127.0.0.1:40000 ifconfig.me; echo  # MUST be Cloudflare
+  sudo systemctl is-active warp-svc stockbot-dashboard stockbot-capture-api
+  cd /home/ubuntu/stock_bot_v4 && python3 spt_watchdog.py --check-only'
+```
+
+**If the first command ever returns a Cloudflare address, stop.** The scraper's
+proxy has escaped its scope and broker traffic is no longer leaving from the
+IP Zerodha expects. See [ARCHITECTURE.md §3.2](ARCHITECTURE.md).
+
+## Network egress
+
+`sptulsian.com` blocks datacenter IPs at the CloudFront edge, so the VM cannot
+reach it directly. Scraper traffic — and only scraper traffic — goes through a
+Cloudflare WARP SOCKS5 proxy on `127.0.0.1:40000`, attached to a single
+`requests.Session`. Broker traffic must keep egressing from the registered
+static IP, because Zerodha binds to it.
+
+The env var is deliberately named `SPTULSIAN_PROXY` rather than
+`HTTP_PROXY`/`HTTPS_PROXY`: `requests` honours the standard names
+automatically for every module in the process, which would silently route
+order placement through the proxy.
+
+## `.env`
+
+Lives at `/home/ubuntu/.env` on the VM, `export KEY=value` format. Never in the
+repo.
+
+```
+# Kite / broker
+KITE_API_KEY=            KITE_API_SECRET=
+ZERODHA_USER_ID=         ZERODHA_PASSWORD=       ZERODHA_TOTP_SECRET=
+ZERODHA_OLD_USER_ID=     ZERODHA_OLD_PASSWORD=   ZERODHA_OLD_TOTP_SECRET=
+
+# Advisory
+GMAIL_USER=              GMAIL_APP_PASSWORD=
+SPT_USERNAME=            SPT_PASSWORD=
+SPTULSIAN_PROXY=socks5h://127.0.0.1:40000
+
+# Oracle
+ORACLE_USER=             ORACLE_PASSWORD=        ORACLE_DSN=
+ORACLE_WALLET_DIR=       ORACLE_WALLET_PASSWORD=
+
+# Dashboard + capture API
+DASH_USERS=user:pass,...
+DASH_SESSION_SECRET=     # 64-char hex; signs the "remember me" cookie
+CAPTURE_API_KEY=         CAPTURE_API_URL=
+```
+
+`KITE_ACCOUNT=OLD` on a one-off run targets the pre-cutover personal Zerodha
+account instead of the automation account. Cron never sets it, so scheduled
+jobs always use the new account.
+
+```bash
+KITE_ACCOUNT=OLD python3 main_gtt_oracle.py
+```
+
+## Working on this safely
+
+The invariants below hold by construction. Preserve them.
+
+1. Broker traffic egresses from the registered static IP. Always.
+2. A symbol that does not resolve cleanly is never bought — it becomes
+   `NEEDS_REVIEW` and waits for a human.
+3. A trade is `Closed` only on a **confirmed** sell fill, never on GTT status
+   alone.
+4. Conviction scores cannot size, gate, or block an order.
+5. Manual buy paths preview before they commit; the confirm step is the only
+   thing that spends money.
+
+Anything touching money or the ledger gets exercised first in an isolated
+directory with Oracle writes, Sheet writes, and order placement monkey-patched
+out, run against real live data and inspected before the real run. That
+convention has caught a pooled-budget bug, a GTT close that recorded no sell
+price, and a `DataFrame.__bool__` call that silently nulled every financial
+statement in the conviction engine.
+
+## Note on the conviction layer
+
+It computes published metrics from public data and shows its working. It is
+decision support, not financial advice, and not a prediction — every threshold
+in it is a convention tuned against one portfolio. That is why it is
+display-only, and why the dashboard shows each score alongside the checks that
+produced it.
