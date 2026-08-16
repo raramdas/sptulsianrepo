@@ -12,7 +12,7 @@ import re, imaplib, email as emaillib
 from datetime import datetime, timedelta
 from email.header import decode_header
 
-from kite_common import (
+from archive.kite_common import (
     log, get_sheet, GSHEET_CREDS_FILE, pad_row,
     COL_STOCK, COL_BUY_DATE, NUM_COLS,
 )
@@ -24,7 +24,7 @@ GMAIL_APP_PASSWORD = os.environ['GMAIL_APP_PASSWORD']
 DRY_RUN   = True   # Set to False for live
 TEST_DATE = '10-Jul-2026'
 
-from kite_common import IST
+from archive.kite_common import IST
 
 
 def get_email_body_text(msg):

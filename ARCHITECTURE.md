@@ -317,24 +317,31 @@ either.
 
 | Module | Role |
 |---|---|
-| `config.py` | Env/credentials, `KITE_ACCOUNT` switch (NEW/OLD), logging, IST |
-| `email_reader.py` | Gmail IMAP; parses the advisory email into tips |
-| `kite_client.py` | Kite login (TOTP), symbol resolution, order and GTT placement |
-| `order_status.py` | Order status lookup and sell-order reconciliation |
-| `budget_manager.py` | Budget policy, all `TRADES` reads/writes |
-| `spt_scraper.py` | Portal login, both parsing strategies, liveness watermark |
-| `conviction.py` | Evidence gathering and the four scoring layers |
 | `main_recommend.py` | **Phase 1** — resolve symbols, scrape targets, no orders |
 | `main.py` | **Phase 2** — price, size, buy |
 | `main_gtt_oracle.py` | **Phase 3** — place GTTs, confirm fills, close trades |
 | `main_conviction.py` | Score today's recommendations (display only) |
 | `spt_watchdog.py` | Liveness alarm for the scraper |
 | `spt_capture.py` | Manual review-then-save of scraped targets |
+| `lib/config.py` | Env/credentials, `KITE_ACCOUNT` switch (NEW/OLD), logging, IST |
+| `lib/email_reader.py` | Gmail IMAP; parses the advisory email into tips |
+| `lib/kite_client.py` | Kite login (TOTP), symbol resolution, order and GTT placement |
+| `lib/order_status.py` | Order status lookup and sell-order reconciliation |
+| `lib/budget_manager.py` | Budget policy, all `TRADES` reads/writes |
+| `lib/spt_scraper.py` | Portal login, both parsing strategies, liveness watermark |
+| `lib/conviction.py` | Evidence gathering and the four scoring layers |
+| `lib/sheet_logger.py` | Google Sheets mirror (legacy, still written) |
 | `dashboard/app.py` | Streamlit UI, all pages |
 | `dashboard/db.py` | Dashboard's Oracle data access |
 | `dashboard/kite_data.py` | Multi-account Kite sync, retry-buy preview/confirm |
 | `dashboard/capture_api.py` | Authenticated endpoint for `spt_capture.py` |
 | `dashboard/theme.py` | CSS design system, table and KPI rendering |
+| `archive/` | Superseded and one-off scripts; nothing scheduled |
+| `bot/` | Multi-tenant variant; keeps its own module copies, not scheduled |
+
+Entrypoints sit at the repository root because cron invokes them by bare
+filename; everything they share lives in `lib/`. `bot/` deliberately does not
+import from `lib/` — it is a self-contained multi-tenant tree.
 
 ### 3.6 Data model
 

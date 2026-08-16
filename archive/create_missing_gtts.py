@@ -48,10 +48,10 @@ import csv
 import time
 from datetime import datetime
 
-from config import log, IST
-from kite_client import get_enctoken, place_gtt, get_market_price, kite_headers
-from budget_manager import get_stock_cap_type, close_oracle_connection
-from sheet_gtt_updater import get_worksheet, get_sheet_rows, COL_CATEGORY, COL_SYMBOL, COL_GTT_STATUS
+from lib.config import log, IST
+from lib.kite_client import get_enctoken, place_gtt, get_market_price, kite_headers
+from lib.budget_manager import get_stock_cap_type, close_oracle_connection
+from archive.sheet_gtt_updater import get_worksheet, get_sheet_rows, COL_CATEGORY, COL_SYMBOL, COL_GTT_STATUS
 import requests
 
 ORDERS_CSV = 'reconciliation_report.csv'

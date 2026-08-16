@@ -11,7 +11,7 @@ Test independently:
 from datetime import datetime
 import oracledb
 
-from config import (
+from lib.config import (
     log, IST, ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN,
     ORACLE_WALLET_DIR, ORACLE_WALLET_PASSWORD
 )

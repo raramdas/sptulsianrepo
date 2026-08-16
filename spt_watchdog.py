@@ -35,8 +35,8 @@ import argparse
 from email.message import EmailMessage
 from datetime import datetime, timezone, timedelta
 
-from config import log, IST, GMAIL_USER, GMAIL_APP_PASSWORD
-from spt_scraper import read_watermark
+from lib.config import log, IST, GMAIL_USER, GMAIL_APP_PASSWORD
+from lib.spt_scraper import read_watermark
 
 ABSOLUTE_STALE_HOURS = 30
 TRADING_DAY_DEADLINE = (10, 30)  # 10:30 IST — after the 9:30 recommend run

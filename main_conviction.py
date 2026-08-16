@@ -18,15 +18,23 @@ Run directly:
     python3 main_conviction.py
     python3 main_conviction.py --all-open
 """
+import os
 import sys
 import json
 import argparse
 from datetime import datetime
 
-from config import log, IST
-import conviction
+from lib.config import log, IST
+from lib import conviction
 
-sys.path.insert(0, '/home/ubuntu/stockbot/dashboard')
+# The dashboard package owns the Oracle access layer. On the VM it is deployed
+# to its own directory; in a checkout it sits alongside this file. Try the
+# local copy first so the script is runnable (and testable) off the VM.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+for _candidate in (os.path.join(_HERE, 'dashboard'), '/home/ubuntu/stockbot/dashboard'):
+    if os.path.isdir(_candidate):
+        sys.path.insert(0, _candidate)
+        break
 import db  # noqa: E402
 
 

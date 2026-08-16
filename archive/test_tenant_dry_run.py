@@ -26,8 +26,8 @@ from dotenv import load_dotenv
 
 load_dotenv('/home/ubuntu/.env')
 
-from crypto_utils import decrypt
-from kite_client import get_enctoken_for, resolve_kite_symbol, get_market_price
+from archive.crypto_utils import decrypt
+from lib.kite_client import get_enctoken_for, resolve_kite_symbol, get_market_price
 
 ORACLE_DSN             = os.environ['ORACLE_DSN']
 ORACLE_WALLET_DIR      = os.environ['ORACLE_WALLET_DIR']

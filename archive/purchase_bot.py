@@ -20,7 +20,7 @@
 import math
 from datetime import datetime
 
-from kite_common import (
+from archive.kite_common import (
     log, get_sheet, get_enctoken, get_ltp, resolve_symbol_strict, kite_headers,
     OMS_BASE, EXCHANGE, IST, pad_row,
     COL_STOCK, COL_SYMBOL, COL_TARGET, COL_INTEREST, COL_STATUS, COL_BUY_OID,

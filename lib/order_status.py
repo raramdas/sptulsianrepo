@@ -6,15 +6,15 @@ only returns the current day's orders).
 
 Test independently:
     python3 -c "
-from kite_client import get_enctoken
-from order_status import get_order_status
+from lib.kite_client import get_enctoken
+from lib.order_status import get_order_status
 enc = get_enctoken()
 print(get_order_status('260701170233191', enc, symbol_hint='IDEA'))
 "
 """
 import requests
-from config import log, OMS_BASE
-from kite_client import kite_headers
+from lib.config import log, OMS_BASE
+from lib.kite_client import kite_headers
 
 _orders_cache = None
 _holdings_cache = None

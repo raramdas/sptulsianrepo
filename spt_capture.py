@@ -37,7 +37,7 @@ from dotenv import load_dotenv
 # of the credentials.
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 load_dotenv('/home/ubuntu/.env')
-import spt_scraper  # noqa: E402
+from lib import spt_scraper  # noqa: E402
 
 
 def fmt_price(v):

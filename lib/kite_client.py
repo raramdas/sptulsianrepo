@@ -17,7 +17,7 @@ import difflib
 import pyotp
 import requests
 
-from config import log, clean_float, OMS_BASE, EXCHANGE, ZERODHA_USER_ID, ZERODHA_PASSWORD, TOTP_SECRET
+from lib.config import log, clean_float, OMS_BASE, EXCHANGE, ZERODHA_USER_ID, ZERODHA_PASSWORD, TOTP_SECRET
 
 
 def get_enctoken():

@@ -1,0 +1,26 @@
+# Runtime dependencies for the scheduled bots (root entrypoints + lib/).
+# The dashboard has its own set in dashboard/requirements.txt.
+#
+# Install on the VM:  pip3 install -r requirements.txt
+
+# Broker, advisory email, portal
+requests>=2.28
+PySocks>=1.7                # SOCKS5 support for requests; required by the
+                            # socks5h:// WARP proxy in lib/spt_scraper.py
+pyotp>=2.9                  # Kite TOTP login
+beautifulsoup4>=4.12        # HTML-rendered advisory sections
+
+# Data / storage
+oracledb>=2.0
+pandas>=2.0
+pytz>=2023.3
+python-dotenv>=1.0
+
+# Conviction engine
+yfinance>=0.2               # fundamentals, consensus, price history
+
+# Google Sheets mirror (lib/sheet_logger.py — legacy, still written to)
+gspread>=5.12
+
+# Tenant secret encryption (archive/ + provisioning/)
+cryptography>=41.0

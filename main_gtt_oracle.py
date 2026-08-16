@@ -19,10 +19,10 @@ Run directly:
 import re
 from datetime import datetime, timedelta
 
-from config import log, GTT_DRY_RUN, IST
-from kite_client import get_enctoken, place_gtt, get_gtt_detail
-from order_status import get_order_status, find_sell_order_for_symbol
-from budget_manager import (
+from lib.config import log, GTT_DRY_RUN, IST
+from lib.kite_client import get_enctoken, place_gtt, get_gtt_detail
+from lib.order_status import get_order_status, find_sell_order_for_symbol
+from lib.budget_manager import (
     get_open_trades_with_target, get_open_trades_with_gtt,
     set_gtt_placed_oracle, mark_trade_error_oracle, close_trade_in_oracle,
     close_oracle_connection,

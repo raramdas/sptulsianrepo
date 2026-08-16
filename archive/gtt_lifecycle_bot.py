@@ -15,7 +15,7 @@
 
 from datetime import datetime, timedelta
 
-from kite_common import (
+from archive.kite_common import (
     log, get_sheet, get_enctoken, get_order_status, get_ltp,
     place_gtt, get_gtt_detail, find_sell_order_for_symbol, clean_float, pad_row,
     IST,

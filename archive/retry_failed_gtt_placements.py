@@ -27,10 +27,10 @@ Run directly:
 """
 from datetime import datetime, timedelta
 
-from config import log, IST
-from kite_client import get_enctoken, place_gtt, get_market_price, resolve_kite_symbol
-from order_status import get_order_status
-from sheet_gtt_updater import (
+from lib.config import log, IST
+from lib.kite_client import get_enctoken, place_gtt, get_market_price, resolve_kite_symbol
+from lib.order_status import get_order_status
+from archive.sheet_gtt_updater import (
     get_sheet_rows, get_worksheet,
     COL_STOCK, COL_SYMBOL, COL_BUY_DATE, COL_MY_BUY_DATE, COL_STATUS, COL_TARGET,
     COL_BUY_OID, COL_GTT_ID, COL_GTT_STATUS, COL_MY_BUY_QTY, COL_NOTES,

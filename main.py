@@ -13,13 +13,13 @@ file the 11:00 AM cron job calls. Run directly:
 import math
 from datetime import datetime
 
-from config import log, DRY_RUN, IST, INVEST_AMT
-from kite_client import get_enctoken, resolve_kite_symbol, get_market_price, kite_buy
-from budget_manager import (
+from lib.config import log, DRY_RUN, IST, INVEST_AMT
+from lib.kite_client import get_enctoken, resolve_kite_symbol, get_market_price, kite_buy
+from lib.budget_manager import (
     get_stock_cap_type, check_budget_available, get_pending_buy_trades,
     get_needs_review_trades_for_retry, update_trade_after_buy_attempt, close_oracle_connection,
 )
-from sheet_logger import log_to_sheet
+from lib.sheet_logger import log_to_sheet
 
 
 def attempt_buy(trade, enctoken):

@@ -7,7 +7,7 @@ Test independently:
     python3 -c "from sheet_gtt_updater import get_sheet_rows; print(len(get_sheet_rows()))"
 """
 import gspread
-from config import log, SHEET_ID, SHEET_TAB, GSHEET_CREDS_FILE
+from lib.config import log, SHEET_ID, SHEET_TAB, GSHEET_CREDS_FILE
 
 # Sheet column indices (0-based) — v3.1 with Symbol at col C
 COL_CATEGORY    = 0   # A

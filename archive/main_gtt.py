@@ -13,11 +13,11 @@ Run directly:
 """
 from datetime import datetime, timedelta
 
-from config import log, GTT_DRY_RUN, IST
-from kite_client import get_enctoken, resolve_kite_symbol, place_gtt, get_gtt_status, get_gtt_detail
-from order_status import get_order_status, find_sell_order_for_symbol
-from budget_manager import close_trade_in_oracle, close_oracle_connection
-from sheet_gtt_updater import (
+from lib.config import log, GTT_DRY_RUN, IST
+from lib.kite_client import get_enctoken, resolve_kite_symbol, place_gtt, get_gtt_status, get_gtt_detail
+from lib.order_status import get_order_status, find_sell_order_for_symbol
+from lib.budget_manager import close_trade_in_oracle, close_oracle_connection
+from archive.sheet_gtt_updater import (
     get_sheet_rows, set_gtt_placed, set_gtt_dry_run, set_error, set_closed, set_gtt_recreated,
     COL_STOCK, COL_SYMBOL, COL_BUY_DATE, COL_STATUS, COL_TARGET, COL_BUY_OID,
     COL_GTT_ID, COL_MY_BUY_QTY, COL_RETRY_CNT,

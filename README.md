@@ -36,20 +36,28 @@ python3 spt_watchdog.py --check-only    # health check, never sends mail
 
 ## Layout
 
+Only entrypoints live at the repository root — one file per thing you can
+run. Everything they share is in `lib/`, and superseded scripts are in
+`archive/`.
+
 ```
-.                          # the live system — this is what cron runs
-├── main_recommend.py      # Phase 1: symbols + targets, no orders
-├── main.py                # Phase 2: price, size, buy
-├── main_gtt_oracle.py     # Phase 3: GTT sells, confirm fills, close
+.
+├── main_recommend.py      # Phase 1: symbols + targets, no orders     ← cron
+├── main.py                # Phase 2: price, size, buy                 ← cron
+├── main_gtt_oracle.py     # Phase 3: GTT sells, confirm fills, close  ← cron
+├── spt_watchdog.py        # Liveness alarm for the scraper            ← cron
 ├── main_conviction.py     # Evidence scoring (display only)
-├── spt_watchdog.py        # Liveness alarm for the scraper
 ├── spt_capture.py         # Manual review-then-save of scraped targets
-├── conviction.py          # Four-layer scoring engine
-├── spt_scraper.py         # Portal login + two parsing strategies
-├── budget_manager.py      # Budget policy; all TRADES reads/writes
-├── kite_client.py         # Kite auth, symbol resolution, orders, GTTs
-├── email_reader.py        # Gmail IMAP -> tips
-├── config.py              # Env, credentials, KITE_ACCOUNT switch
+│
+├── lib/                   # shared modules
+│   ├── config.py          #   env, credentials, KITE_ACCOUNT switch
+│   ├── kite_client.py     #   Kite auth, symbol resolution, orders, GTTs
+│   ├── order_status.py    #   order lookup, sell reconciliation
+│   ├── email_reader.py    #   Gmail IMAP -> tips
+│   ├── budget_manager.py  #   budget policy; all TRADES reads/writes
+│   ├── spt_scraper.py     #   portal login + two parsing strategies
+│   ├── conviction.py      #   four-layer scoring engine
+│   └── sheet_logger.py    #   Google Sheets mirror (legacy)
 │
 ├── dashboard/             # Streamlit UI ("Capital Ledger")
 │   ├── app.py             #   pages
@@ -58,15 +66,21 @@ python3 spt_watchdog.py --check-only    # health check, never sends mail
 │   ├── capture_api.py     #   authenticated endpoint for spt_capture.py
 │   └── theme.py           #   CSS design system
 │
-├── bot/                   # Multi-tenant variant — NOT currently scheduled
-├── provisioning/          # Tenant onboarding for the bot/ tree
-└── tests/                 # Logic validated against SQLite mocks
+├── archive/               # superseded / one-off — see archive/README.md
+├── bot/                   # multi-tenant variant — NOT scheduled
+├── provisioning/          # tenant onboarding for the bot/ tree
+└── tests/                 # logic validated against SQLite mocks
 ```
 
+Entrypoints stay at the root deliberately: cron invokes them by bare filename
+(`cd /home/ubuntu/stock_bot_v4 && python3 main_recommend.py`), so moving them
+would mean editing the crontab on a live system for no benefit.
+
 `bot/` is a multi-tenant version (schema-per-tenant, encrypted per-tenant
-credentials) that is not in the live crontab. The scheduled system is the
-single-tenant root tree. Keep `bot/` in sync when changing shared modules, or
-it will silently diverge.
+credentials) that is not in the live crontab and keeps its own module copies —
+it does **not** import from `lib/`. The scheduled system is the single-tenant
+root tree. Keep the two in sync when changing shared logic, or they will
+silently diverge.
 
 ## Deploy
 

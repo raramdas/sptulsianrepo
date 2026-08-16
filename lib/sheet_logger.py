@@ -5,7 +5,7 @@ checks for duplicate trades, and reads manually-entered target prices.
 
 Test independently:
     python3 -c "
-from sheet_logger import log_to_sheet
+from lib.sheet_logger import log_to_sheet
 log_to_sheet({'category':'Test','stock':'TESTSTOCK','kite_symbol':'TEST',
               'email_price':100,'buy_price':100,'qty':1,'order_type':'LIMIT',
               'buy_order_id':'TEST123','note':'module test'})
@@ -14,7 +14,7 @@ log_to_sheet({'category':'Test','stock':'TESTSTOCK','kite_symbol':'TEST',
 import gspread
 from datetime import datetime
 
-from config import log, SHEET_ID, SHEET_TAB, GSHEET_CREDS_FILE, IST, clean_float
+from lib.config import log, SHEET_ID, SHEET_TAB, GSHEET_CREDS_FILE, IST, clean_float
 
 
 def log_to_sheet(tip):

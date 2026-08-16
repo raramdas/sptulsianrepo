@@ -12,7 +12,7 @@ import re
 import time
 from datetime import datetime, timedelta
 
-from config import log, IST, GMAIL_USER, GMAIL_APP_PASSWORD, TEST_DATE
+from lib.config import log, IST, GMAIL_USER, GMAIL_APP_PASSWORD, TEST_DATE
 
 # Known SPTulsian categories — must match category_allocation.category_name in Oracle exactly.
 # Sorted longest-first so "Medium Term Investments" is matched before a shorter partial like "Medium Term".

@@ -12,11 +12,11 @@ Phase 2 (the actual buying) is main.py, scheduled 90 minutes after this.
 This is the file the 9:30 AM cron job calls. Run directly:
     python3 main_recommend.py
 """
-from config import log
-from kite_client import get_enctoken, resolve_kite_symbol
-from email_reader import parse_todays_emails
-from spt_scraper import refresh_spt_data, scrape_spt_stock, quit_spt_driver
-from budget_manager import get_stock_cap_type, insert_trade_to_oracle, close_oracle_connection
+from lib.config import log
+from lib.kite_client import get_enctoken, resolve_kite_symbol
+from lib.email_reader import parse_todays_emails
+from lib.spt_scraper import refresh_spt_data, scrape_spt_stock, quit_spt_driver
+from lib.budget_manager import get_stock_cap_type, insert_trade_to_oracle, close_oracle_connection
 
 
 def process_tip(tip, enctoken):
