@@ -58,24 +58,37 @@ def build_matches(results):
     category_errors)."""
     category_errors = {cat: r['error'] for cat, r in results.items() if r.get('error')}
 
-    # Flatten all scraped rows across categories, one row per stock.
+    # Index scraped rows BOTH by (category, stock) and by stock alone.
     #
-    # A LIVE call always beats an archived one. Most rows on the HTML-rendered
-    # sections are closed calls (e.g. 40 of 41 on Medium Term Investments), and
-    # letting a closed call win would write its stale target onto an open
-    # position — i.e. arm a GTT at the wrong price. Within the same source,
-    # first-seen wins, and both strategies emit newest-first.
-    scraped_by_stock = {}
+    # Category matters: the same stock is often called in several sections
+    # with different targets and horizons (a Multibagger call may target 2027
+    # at a far higher price than a 3-month Big Gems call on the same stock).
+    # Applying the wrong section's target would arm a GTT that never triggers
+    # and park the capital, so a same-category call is always preferred and a
+    # cross-category one is flagged rather than silently used.
+    #
+    # Within a bucket, a LIVE call always beats an archived one — most rows on
+    # the HTML sections are closed calls (40 of 41 on Medium Term), and a
+    # closed call's stale target must not overwrite a live position. Within
+    # the same source, first-seen wins; both strategies emit newest-first.
+    def _better(existing, row):
+        if existing is None:
+            return True
+        return existing.get('source') != 'active' and row.get('source') == 'active'
+
+    by_cat_stock = {}
+    by_stock = {}
     for cat, r in results.items():
+        cat_key = _norm(cat)
         for row in r.get('rows', []):
             key = _norm(row['stock_name'])
             if not key:
                 continue
-            existing = scraped_by_stock.get(key)
-            if existing is None:
-                scraped_by_stock[key] = row
-            elif existing.get('source') != 'active' and row.get('source') == 'active':
-                scraped_by_stock[key] = row
+            row['_spt_category'] = cat  # so the preview can show its origin
+            if _better(by_cat_stock.get((cat_key, key)), row):
+                by_cat_stock[(cat_key, key)] = row
+            if _better(by_stock.get(key), row):
+                by_stock[key] = row
 
     open_trades = db.open_trades_for_capture()
 
@@ -83,15 +96,22 @@ def build_matches(results):
     unmatched_trades = []
     for _, t in open_trades.iterrows():
         key = _norm(t['stock_name'])
-        row = scraped_by_stock.get(key)
+        cat_key = _norm(t['category_name'])
+
+        # 1. same category, exact stock name
+        row = by_cat_stock.get((cat_key, key))
         confidence = 'exact'
+        # 2. same category, fuzzy stock name
         if row is None:
-            # weak fallback: substring containment either direction
-            for skey, srow in scraped_by_stock.items():
-                if key and (key in skey or skey in key):
-                    row = srow
-                    confidence = 'fuzzy'
+            for (ck, sk), srow in by_cat_stock.items():
+                if ck == cat_key and key and (key in sk or sk in key):
+                    row, confidence = srow, 'fuzzy'
                     break
+        # 3. any category — kept, but flagged, since the target may belong to
+        #    a different time horizon than the trade was taken on
+        if row is None:
+            row = by_stock.get(key)
+            confidence = 'cross-category' if row is not None else confidence
         if row is None:
             unmatched_trades.append({
                 'trade_id': int(t['trade_id']), 'stock_name': t['stock_name'],
@@ -117,6 +137,7 @@ def build_matches(results):
             'spt_call_datetime': row.get('call_datetime', ''),
             'spt_source': row.get('source', 'unknown'),
             'spt_exit_remarks': row.get('exit_remarks', ''),
+            'spt_category': row.get('_spt_category', ''),
             'old_target': old_target, 'new_target': new_target,
             'old_have_interest': old_interest, 'new_have_interest': new_interest,
             'old_timeframe': old_timeframe, 'new_timeframe': new_timeframe,

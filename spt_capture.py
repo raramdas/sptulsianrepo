@@ -48,6 +48,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--dry-run', action='store_true', help="Preview only, never save")
     ap.add_argument('--yes', action='store_true', help="Skip the confirmation prompt")
+    ap.add_argument('--include-cross-category', action='store_true',
+                    help="Also apply calls found in a DIFFERENT SPTulsian section than "
+                         "the trade's own (off by default — those targets often belong "
+                         "to a different time horizon)")
+    ap.add_argument('--include-closed', action='store_true',
+                    help="Also apply calls SPTulsian has already closed/archived "
+                         "(off by default)")
     args = ap.parse_args()
 
     username = os.environ.get('SPT_USERNAME', '')
@@ -80,6 +87,20 @@ def main():
     cat_errors = preview['category_errors']
     changed = [m for m in matches if m['changed']]
 
+    # Hold back the two risky classes unless explicitly asked for. A closed
+    # call is one SPTulsian is no longer running; a cross-category call came
+    # from a different section than the trade was taken on, so its target
+    # usually assumes a different time horizon. Either can arm a GTT at a
+    # price that never triggers.
+    held_back = []
+    if not args.include_closed:
+        held_back += [m for m in changed if m.get('spt_source') == 'archive']
+    if not args.include_cross_category:
+        held_back += [m for m in changed
+                      if m.get('match_confidence') == 'cross-category'
+                      and m not in held_back]
+    changed = [m for m in changed if m not in held_back]
+
     print(f"\n{'='*70}")
     if cat_errors:
         print("Sections that could NOT be fetched (skipped, not your fault):")
@@ -91,16 +112,12 @@ def main():
         print("No changes found — every matched open trade already has the latest "
               "target/timeframe/have-interest on file.")
     else:
-        n_archived = sum(1 for m in changed if m.get('spt_source') == 'archive')
-        print(f"{len(changed)} open trade(s) would be updated:")
-        if n_archived:
-            print(f"  NOTE: {n_archived} of these match a CLOSED (archived) SPTulsian call, "
-                  f"marked [closed call] below — SPTulsian is no longer running that call, "
-                  f"so check the target still makes sense before saving.")
-        print()
+        print(f"{len(changed)} open trade(s) would be updated:\n")
         for m in changed:
             src = m.get('spt_source', 'unknown')
             tag = " [closed call]" if src == 'archive' else ""
+            if m.get('match_confidence') == 'cross-category':
+                tag += f" [from SPT section: {m.get('spt_category', '?')}]"
             print(f"#{m['trade_id']} {m['stock_name']} ({m['category_name']}, bought {m['buy_date']}) "
                   f"[{m['match_confidence']} match, SPT call {m['spt_call_datetime']}]{tag}")
             if m.get('spt_exit_remarks'):
@@ -112,6 +129,22 @@ def main():
             if m['old_have_interest'] != m['new_have_interest']:
                 print(f"    Have Interest: {m['old_have_interest'] or '—'}  ->  {m['new_have_interest']}")
             print()
+
+    if held_back:
+        n_closed = sum(1 for m in held_back if m.get('spt_source') == 'archive')
+        n_cross = sum(1 for m in held_back if m.get('match_confidence') == 'cross-category')
+        print(f"{len(held_back)} change(s) HELD BACK and not offered for saving "
+              f"({n_closed} from closed calls, {n_cross} from another section):")
+        for m in held_back:
+            why = []
+            if m.get('spt_source') == 'archive':
+                why.append('closed call')
+            if m.get('match_confidence') == 'cross-category':
+                why.append(f"SPT section '{m.get('spt_category', '?')}' != trade's '{m['category_name']}'")
+            print(f"  - #{m['trade_id']} {m['stock_name']} ({m['category_name']}): "
+                  f"target {fmt_price(m['old_target'])} -> {fmt_price(m['new_target'])} "
+                  f"[{'; '.join(why)}]")
+        print("  Re-run with --include-closed / --include-cross-category to apply these.\n")
 
     if unmatched:
         print(f"{len(unmatched)} open trade(s) had no matching SPTulsian call found this run:")
