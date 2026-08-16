@@ -20,6 +20,12 @@ from dotenv import load_dotenv
 
 IST = pytz.timezone('Asia/Kolkata')
 
+# Return CLOB columns as plain strings rather than LOB handles. Without this,
+# conviction_scores' JSON columns arrive as oracledb.LOB objects and every
+# json.loads() on them raises TypeError — and because that only fires at
+# render time, the service still reports healthy.
+oracledb.defaults.fetch_lobs = False
+
 load_dotenv('/home/ubuntu/.env')
 
 ORACLE_USER            = os.environ['ORACLE_USER']
