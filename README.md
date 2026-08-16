@@ -11,12 +11,13 @@ non-obvious parts. Read that before changing anything load-bearing.
 
 ## How it runs
 
-Four scheduled jobs on the VM. All cron times are **UTC**; the VM clock is UTC
+Five scheduled jobs on the VM. All cron times are **UTC**; the VM clock is UTC
 and IST is UTC+5:30.
 
 | Job | UTC | IST | What it does |
 |---|---|---|---|
 | `main_recommend.py` | `0 4` | 09:30 | Parse the advisory email, resolve symbols, scrape targets. **No orders.** |
+| `main_conviction.py` | `45 4` | 10:15 | Score new recommendations on public evidence. Display only. |
 | `spt_watchdog.py` | `15 5` | 10:45 | Alarm if the scraper has gone dark |
 | `main.py` | `30 5` | 11:00 | Price, size against budget, place real buy orders |
 | `main_gtt_oracle.py` | `30 10` | 16:00 | Place GTT sells; close trades on confirmed fills |
@@ -29,7 +30,7 @@ guess.
 Run on demand:
 
 ```bash
-python3 main_conviction.py --all-open   # score positions on public evidence
+python3 main_conviction.py --all-open   # re-score every open position
 python3 spt_capture.py --dry-run        # preview scraped targets, then save
 python3 spt_watchdog.py --check-only    # health check, never sends mail
 ```

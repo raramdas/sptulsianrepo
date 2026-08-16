@@ -370,7 +370,7 @@ The VM clock is **UTC**; IST is UTC+5:30.
 | Job | Cron (UTC) | IST | Purpose |
 |---|---|---|---|
 | `main_recommend.py` | `0 4 * * 1-5` | 09:30 | Phase 1 |
-| `main_conviction.py` | *(not yet scheduled)* | ~10:15 | Scoring |
+| `main_conviction.py` | `45 4 * * 1-5` | 10:15 | Scoring (display only) |
 | `spt_watchdog.py` | `15 5 * * 1-5` | 10:45 | Liveness alarm |
 | `main.py` | `30 5 * * 1-5` | 11:00 | Phase 2 |
 | `main_gtt_oracle.py` | `30 10 * * 1-5` | 16:00 | Phase 3 |
@@ -480,8 +480,6 @@ during development. Commands that move money are handed to the operator to run.
 - **Conviction governance is partial.** Promoter *pledge* and holding *trend*
   need shareholding-pattern filings, which are not yet parsed; only point-in-time
   holding percentages are scored.
-- **Conviction is unscheduled.** It runs on demand until it has a track record
-  worth trusting.
 - **Analyst consensus is thin for micro caps** by nature. Handled by
   renormalisation, but it means the Consensus layer contributes little for much
   of Little Gems.
