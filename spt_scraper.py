@@ -84,6 +84,13 @@ _ACTIVE_EP_RE = re.compile(r'/get([A-Za-z0-9]+?)ActiveData')
 _TARGET_RE = re.compile(r'Target:\s*([\d,]+(?:\.\d+)?)\s*(?:\(([^)]*)\))?', re.I)
 _BUY_RE = re.compile(r'Buy\s*@?\s*([\d,]+(?:\.\d+)?)\s*(?:\(([^)]*)\))?', re.I)
 _INTEREST_RE = re.compile(r'\b(Have|No)\s+interest\b', re.I)
+# Phrases SPTulsian uses when a call has actually been exited. Being listed
+# under "Archives" is NOT itself proof of closure — Little Gems and Big Gems
+# carry no active calls at all on this subscription, so even same-day calls
+# appear there with no exit info. Only an exit remark means genuinely closed.
+_EXIT_RE = re.compile(
+    r'(target met|stop\s*loss|exited|booked|profit booked|loss booked|'
+    r'sold (?:share|at|@)|partial exit)', re.I)
 
 # SPTULSIAN_PROXY scopes a SOCKS5 egress to *only* the scraper's session.
 #
@@ -186,13 +193,18 @@ def _category_slug(category_url):
 
 def _row(stock_name, target_price, timeframe, have_interest, source,
          call_id=None, call_datetime='', buy_price=None, exit_remarks=''):
-    """One normalised call row — the single shape both strategies emit."""
+    """One normalised call row — the single shape both strategies emit.
+
+    'closed' is what callers should gate on, not 'source': a row is only
+    treated as closed when SPTulsian left an exit remark on it. Sitting in
+    the archive list is not enough (see _EXIT_RE)."""
     return {
         'stock_name': stock_name,
         'target_price': target_price,
         'timeframe': timeframe,
         'have_interest': have_interest,
         'source': source,            # 'active' | 'archive'
+        'closed': bool((exit_remarks or '').strip()),
         'call_id': call_id,
         'call_datetime': call_datetime,
         'buy_price': buy_price,
@@ -258,6 +270,13 @@ def _parse_html_table(table, source):
             continue
         bm = _BUY_RE.search(text)
         im = _INTEREST_RE.search(text)
+        # Exit info lives in the archive table's Exit Remarks column, but the
+        # cell index is not stable across rows, so read it out of the row text.
+        exit_remarks = ''
+        if source == 'archive':
+            em = _EXIT_RE.search(text)
+            if em:
+                exit_remarks = text[em.start():em.start() + 90].strip()
         rows.append(_row(
             stock_name=name,
             target_price=_clean_float(tm.group(1)),
@@ -266,6 +285,7 @@ def _parse_html_table(table, source):
             source=source,
             call_datetime=((bm.group(2) or '').strip() if bm else ''),
             buy_price=(_clean_float(bm.group(1)) if bm else None),
+            exit_remarks=exit_remarks,
         ))
     return rows
 

@@ -67,14 +67,18 @@ def build_matches(results):
     # and park the capital, so a same-category call is always preferred and a
     # cross-category one is flagged rather than silently used.
     #
-    # Within a bucket, a LIVE call always beats an archived one — most rows on
-    # the HTML sections are closed calls (40 of 41 on Medium Term), and a
-    # closed call's stale target must not overwrite a live position. Within
-    # the same source, first-seen wins; both strategies emit newest-first.
+    # Within a bucket, prefer a still-running call over a closed one — a
+    # closed call's stale target must not overwrite a live position. Note the
+    # test is 'closed' (an actual exit remark), not merely 'archive': Little
+    # Gems and Big Gems have no active list at all on this subscription, so
+    # even same-day calls arrive tagged archive. Ties break on first-seen, and
+    # both strategies emit newest-first.
+    def _rank(row):
+        return (0 if row.get('closed') else 1,
+                1 if row.get('source') == 'active' else 0)
+
     def _better(existing, row):
-        if existing is None:
-            return True
-        return existing.get('source') != 'active' and row.get('source') == 'active'
+        return existing is None or _rank(row) > _rank(existing)
 
     by_cat_stock = {}
     by_stock = {}
@@ -136,6 +140,7 @@ def build_matches(results):
             'match_confidence': confidence,
             'spt_call_datetime': row.get('call_datetime', ''),
             'spt_source': row.get('source', 'unknown'),
+            'spt_closed': bool(row.get('closed')),
             'spt_exit_remarks': row.get('exit_remarks', ''),
             'spt_category': row.get('_spt_category', ''),
             'old_target': old_target, 'new_target': new_target,

@@ -94,7 +94,7 @@ def main():
     # price that never triggers.
     held_back = []
     if not args.include_closed:
-        held_back += [m for m in changed if m.get('spt_source') == 'archive']
+        held_back += [m for m in changed if m.get('spt_closed')]
     if not args.include_cross_category:
         held_back += [m for m in changed
                       if m.get('match_confidence') == 'cross-category'
@@ -114,8 +114,7 @@ def main():
     else:
         print(f"{len(changed)} open trade(s) would be updated:\n")
         for m in changed:
-            src = m.get('spt_source', 'unknown')
-            tag = " [closed call]" if src == 'archive' else ""
+            tag = " [closed call]" if m.get('spt_closed') else ""
             if m.get('match_confidence') == 'cross-category':
                 tag += f" [from SPT section: {m.get('spt_category', '?')}]"
             print(f"#{m['trade_id']} {m['stock_name']} ({m['category_name']}, bought {m['buy_date']}) "
@@ -131,13 +130,13 @@ def main():
             print()
 
     if held_back:
-        n_closed = sum(1 for m in held_back if m.get('spt_source') == 'archive')
+        n_closed = sum(1 for m in held_back if m.get('spt_closed'))
         n_cross = sum(1 for m in held_back if m.get('match_confidence') == 'cross-category')
         print(f"{len(held_back)} change(s) HELD BACK and not offered for saving "
               f"({n_closed} from closed calls, {n_cross} from another section):")
         for m in held_back:
             why = []
-            if m.get('spt_source') == 'archive':
+            if m.get('spt_closed'):
                 why.append('closed call')
             if m.get('match_confidence') == 'cross-category':
                 why.append(f"SPT section '{m.get('spt_category', '?')}' != trade's '{m['category_name']}'")
