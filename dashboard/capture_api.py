@@ -58,14 +58,23 @@ def build_matches(results):
     category_errors)."""
     category_errors = {cat: r['error'] for cat, r in results.items() if r.get('error')}
 
-    # Flatten all scraped rows across categories, most-recent-per-stock wins
-    # (scrape_category already orders active-then-archive, i.e. newest first,
-    # so the first occurrence of a normalized stock name is the latest call).
+    # Flatten all scraped rows across categories, one row per stock.
+    #
+    # A LIVE call always beats an archived one. Most rows on the HTML-rendered
+    # sections are closed calls (e.g. 40 of 41 on Medium Term Investments), and
+    # letting a closed call win would write its stale target onto an open
+    # position — i.e. arm a GTT at the wrong price. Within the same source,
+    # first-seen wins, and both strategies emit newest-first.
     scraped_by_stock = {}
     for cat, r in results.items():
         for row in r.get('rows', []):
             key = _norm(row['stock_name'])
-            if key and key not in scraped_by_stock:
+            if not key:
+                continue
+            existing = scraped_by_stock.get(key)
+            if existing is None:
+                scraped_by_stock[key] = row
+            elif existing.get('source') != 'active' and row.get('source') == 'active':
                 scraped_by_stock[key] = row
 
     open_trades = db.open_trades_for_capture()
@@ -106,6 +115,8 @@ def build_matches(results):
             'buy_date': str(t['buy_date']),
             'match_confidence': confidence,
             'spt_call_datetime': row.get('call_datetime', ''),
+            'spt_source': row.get('source', 'unknown'),
+            'spt_exit_remarks': row.get('exit_remarks', ''),
             'old_target': old_target, 'new_target': new_target,
             'old_have_interest': old_interest, 'new_have_interest': new_interest,
             'old_timeframe': old_timeframe, 'new_timeframe': new_timeframe,

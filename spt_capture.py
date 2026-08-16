@@ -82,10 +82,20 @@ def main():
         print("No changes found — every matched open trade already has the latest "
               "target/timeframe/have-interest on file.")
     else:
-        print(f"{len(changed)} open trade(s) would be updated:\n")
+        n_archived = sum(1 for m in changed if m.get('spt_source') == 'archive')
+        print(f"{len(changed)} open trade(s) would be updated:")
+        if n_archived:
+            print(f"  NOTE: {n_archived} of these match a CLOSED (archived) SPTulsian call, "
+                  f"marked [closed call] below — SPTulsian is no longer running that call, "
+                  f"so check the target still makes sense before saving.")
+        print()
         for m in changed:
+            src = m.get('spt_source', 'unknown')
+            tag = " [closed call]" if src == 'archive' else ""
             print(f"#{m['trade_id']} {m['stock_name']} ({m['category_name']}, bought {m['buy_date']}) "
-                  f"[{m['match_confidence']} match, SPT call {m['spt_call_datetime']}]")
+                  f"[{m['match_confidence']} match, SPT call {m['spt_call_datetime']}]{tag}")
+            if m.get('spt_exit_remarks'):
+                print(f"    SPT exit remark: {m['spt_exit_remarks']}")
             if m['old_target'] != m['new_target']:
                 print(f"    Target:        {fmt_price(m['old_target'])}  ->  {fmt_price(m['new_target'])}")
             if m['old_timeframe'] != m['new_timeframe']:
