@@ -16,6 +16,10 @@ Setup (one-time): create a `.env` file next to this script with:
     CAPTURE_API_URL=https://raramdas-stockbot.duckdns.org/api/spt-capture
     CAPTURE_API_KEY=...
 
+On the VM this needs no .env of its own — it falls back to /home/ubuntu/.env,
+which already carries the credentials plus SPTULSIAN_PROXY (the WARP SOCKS5
+egress that gets it past CloudFront's block on the VM's IP).
+
 Usage:
     python3 spt_capture.py            # scrape, preview, ask before saving
     python3 spt_capture.py --dry-run  # scrape + preview only, never saves
@@ -27,7 +31,12 @@ import argparse
 import requests
 from dotenv import load_dotenv
 
+# Laptop layout first (a .env beside this script), then the VM's shared
+# /home/ubuntu/.env. load_dotenv doesn't overwrite already-set vars, so the
+# local file wins where both define a key, and the VM needs no duplicate copy
+# of the credentials.
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
+load_dotenv('/home/ubuntu/.env')
 import spt_scraper  # noqa: E402
 
 
