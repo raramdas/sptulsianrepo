@@ -185,6 +185,7 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 .kpi-card.tone-positive {{ border-top-color: {POSITIVE}; }}
 .kpi-card.tone-negative {{ border-top-color: {NEGATIVE}; }}
 .kpi-card.tone-accent   {{ border-top-color: {ACCENT}; }}
+.kpi-card.tone-warning  {{ border-top-color: {WARNING}; }}
 .kpi-card .label {{
     font-family: 'Inter', sans-serif;
     font-size: 0.72rem;
@@ -205,6 +206,7 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 .kpi-card.tone-positive .value {{ color: {POSITIVE} !important; }}
 .kpi-card.tone-negative .value {{ color: {NEGATIVE} !important; }}
 .kpi-card.tone-accent .value {{ color: {ACCENT} !important; }}
+.kpi-card.tone-warning .value {{ color: {WARNING} !important; }}
 
 /* Category allocation bar */
 .cat-row {{ margin-bottom: 1.2rem; }}

@@ -690,3 +690,32 @@ if __name__ == '__main__':
     print("\nCategory status:")
     print(category_status().to_string())
     print("\nPerformance summary:", performance_summary())
+
+
+def conviction_latest():
+    """Most recent conviction score per trade. Scores are appended over time
+    (the table keeps history), so this picks the newest row per trade_id."""
+    return _df("""
+        SELECT c.trade_id, c.symbol, c.stock_name, c.category_name, c.scored_at,
+               c.score, c.evidence_pct, c.tier, c.verdict, c.sector,
+               c.reasons, c.warnings, c.layers_json,
+               t.status, t.buy_date, t.my_buy_price, t.target_price
+        FROM conviction_scores c
+        JOIN (
+            SELECT trade_id, MAX(score_id) AS score_id
+            FROM conviction_scores GROUP BY trade_id
+        ) latest ON latest.score_id = c.score_id
+        LEFT JOIN trades t ON t.trade_id = c.trade_id
+        ORDER BY c.score DESC NULLS LAST, c.trade_id DESC
+    """)
+
+
+def conviction_for_trade(trade_id):
+    """Full scoring history for one trade, newest first."""
+    return _df("""
+        SELECT score_id, scored_at, score, evidence_pct, tier, verdict,
+               sector, reasons, warnings, layers_json
+        FROM conviction_scores
+        WHERE trade_id = :tid
+        ORDER BY score_id DESC
+    """, {'tid': trade_id})

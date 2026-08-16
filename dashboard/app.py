@@ -22,6 +22,7 @@ Pages:
 import os
 import time
 import datetime
+import json
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
@@ -557,6 +558,130 @@ def page_needs_review():
                             st.error(f"Buy failed: {e}")
 
 
+CONVICTION_TONES = {
+    'ACCEPT': ('#16A34A', 'Accept'),
+    'RECOMMEND REJECT': ('#DC2626', 'Recommend reject'),
+    'INSUFFICIENT EVIDENCE': ('#F59E0B', 'Insufficient evidence'),
+}
+
+
+def _conviction_badge(verdict):
+    colour, label = CONVICTION_TONES.get(verdict, ('#6B7280', verdict or '—'))
+    return (f'<span style="display:inline-block;padding:2px 10px;border-radius:999px;'
+            f'font-size:0.78rem;font-weight:600;color:{colour};'
+            f'background:{colour}1A;border:1px solid {colour}33;">{label}</span>')
+
+
+def _conviction_bar(pct, colour):
+    pct = max(0.0, min(100.0, float(pct or 0)))
+    return (f'<div style="background:#E5E7EB;border-radius:999px;height:7px;width:100%;">'
+            f'<div style="width:{pct:.0f}%;background:{colour};height:7px;'
+            f'border-radius:999px;"></div></div>')
+
+
+def page_conviction():
+    st.title("Conviction")
+    st.caption("How well each recommendation is supported by public evidence — "
+               "Piotroski, Altman Z\u2033-EM, Beneish, analyst consensus, trend and "
+               "liquidity, NSE surveillance. This is decision support, not advice, "
+               "and it does not affect what the bot buys or how much.")
+
+    df = db.conviction_latest()
+    if df.empty:
+        st.info("No conviction scores yet. They are written by main_conviction.py, "
+                "which runs after the 9:30 AM recommendation job.")
+        return
+
+    scored = pd.to_numeric(df['score'], errors='coerce')
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        st.markdown(theme.kpi_card("Scored positions", len(df)), unsafe_allow_html=True)
+    with c2:
+        med = scored.median()
+        st.markdown(theme.kpi_card("Median score", "—" if pd.isna(med) else f"{med:.0f}"),
+                    unsafe_allow_html=True)
+    with c3:
+        flagged = int((df['verdict'] == 'RECOMMEND REJECT').sum())
+        st.markdown(theme.kpi_card("Flagged", flagged,
+                                   tone="negative" if flagged else "default"),
+                    unsafe_allow_html=True)
+    with c4:
+        thin = int(pd.to_numeric(df['evidence_pct'], errors='coerce').lt(60).sum())
+        st.markdown(theme.kpi_card("Thin evidence", thin,
+                                   tone="warning" if thin else "default"),
+                    unsafe_allow_html=True)
+
+    fcol, scol, _sp = st.columns([1, 1, 2])
+    with fcol:
+        verdicts = ['All'] + sorted(df['verdict'].dropna().unique().tolist())
+        vpick = st.selectbox("Verdict", verdicts)
+    with scol:
+        sort_by = st.selectbox("Sort by", ["Score (high first)", "Score (low first)",
+                                           "Evidence (low first)", "Most recent"])
+
+    view = df if vpick == 'All' else df[df['verdict'] == vpick]
+    if sort_by == "Score (low first)":
+        view = view.sort_values('score', na_position='first')
+    elif sort_by == "Evidence (low first)":
+        view = view.sort_values('evidence_pct', na_position='first')
+    elif sort_by == "Most recent":
+        view = view.sort_values('scored_at', ascending=False)
+    else:
+        view = view.sort_values('score', ascending=False, na_position='last')
+
+    st.caption(f"{len(view)} position(s)")
+
+    for _, r in view.iterrows():
+        score = None if pd.isna(r['score']) else float(r['score'])
+        ev = 0 if pd.isna(r['evidence_pct']) else float(r['evidence_pct'])
+        colour = ('#16A34A' if (score or 0) >= 65 else
+                  '#F59E0B' if (score or 0) >= 50 else '#DC2626')
+        score_txt = "n/a" if score is None else f"{score:.0f}"
+
+        header = (f"{r['stock_name']} ({r['symbol']}) \u2014 "
+                  f"{score_txt}/100 \u00b7 {r['tier']} \u00b7 {r['verdict']}")
+        with st.expander(header, expanded=False):
+            st.markdown(
+                f"<div style='display:flex;gap:1.5rem;align-items:center;flex-wrap:wrap;'>"
+                f"<div style='font-size:2rem;font-weight:700;color:{colour};'>{score_txt}"
+                f"<span style='font-size:0.9rem;color:#6B7280;font-weight:400;'>/100</span></div>"
+                f"<div>{_conviction_badge(r['verdict'])}</div>"
+                f"<div style='color:#6B7280;font-size:0.85rem;'>trade #{int(r['trade_id'])} \u00b7 "
+                f"{r['category_name']} \u00b7 {r['sector'] or 'sector n/a'}</div></div>",
+                unsafe_allow_html=True)
+
+            st.markdown(f"<div style='margin:0.6rem 0 0.2rem;color:#6B7280;font-size:0.8rem;'>"
+                        f"Evidence assessed: {ev:.0f} of 100 points</div>"
+                        + _conviction_bar(ev, '#2563EB'), unsafe_allow_html=True)
+            if ev < 60:
+                st.caption("Thin evidence — the score rests on relatively few checks. "
+                           "That means less is known, not that the stock is worse.")
+
+            for reason in json.loads(r['reasons'] or '[]'):
+                st.error(reason)
+            for warn in json.loads(r['warnings'] or '[]'):
+                st.warning(warn)
+
+            layers = json.loads(r['layers_json'] or '{}')
+            for name, layer in layers.items():
+                q = layer.get('pct')
+                q_txt = "not assessed" if q is None else f"{q:.0f}%"
+                st.markdown(
+                    f"**{name.title()}** &nbsp;<span style='color:#6B7280;font-size:0.85rem;'>"
+                    f"{layer['awarded']:.1f} of {layer['attempted']:.1f} weighted points "
+                    f"(quality {q_txt}, coverage {layer.get('coverage', 0):.0f}%)</span>",
+                    unsafe_allow_html=True)
+                rows = []
+                for c in layer.get('checks', []):
+                    mark = {'OK': '', 'UNKNOWN': '?', 'NA': '—'}.get(c['status'], '')
+                    pts = (f"{c['awarded']:.1f}/{c['attempted']:.0f}"
+                           if c['attempted'] else mark or '—')
+                    rows.append({'Check': c['name'], 'Points': pts, 'Detail': c['detail']})
+                if rows:
+                    st.markdown(theme.render_table(pd.DataFrame(rows)),
+                                unsafe_allow_html=True)
+
+
 def page_classification():
     st.title("Stock Cap Classification")
     st.caption("Source: AMFI official market-cap categorization")
@@ -766,6 +891,7 @@ PAGES = [
     "Set Targets",
     "Trades Explorer",
     "Recommendations",
+    "Conviction",
     "Needs Review",
     "Open Orders",
     "Classification",
@@ -798,6 +924,8 @@ def main():
             page_drilldown()
         elif page == "Performance":
             page_performance()
+        elif page == "Conviction":
+            page_conviction()
         elif page == "Set Targets":
             page_set_targets()
         elif page == "Trades Explorer":
