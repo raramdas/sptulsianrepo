@@ -15,7 +15,7 @@ This is the file the 9:30 AM cron job calls. Run directly:
 from config import log
 from kite_client import get_enctoken, resolve_kite_symbol
 from email_reader import parse_todays_emails
-from spt_scraper import scrape_spt_stock, quit_spt_driver
+from spt_scraper import refresh_spt_data, scrape_spt_stock, quit_spt_driver
 from budget_manager import get_stock_cap_type, insert_trade_to_oracle, close_oracle_connection
 
 
@@ -57,6 +57,12 @@ def run():
 
     enctoken = get_enctoken()
     log("Kite enctoken obtained OK.")
+
+    # Refresh SPTulsian BEFORE the no-tips early return, so the liveness
+    # watermark is written on every weekday run. If it only happened as a
+    # side effect of a tip lookup, a market holiday (weekday, no tips) would
+    # leave the watermark stale and spt_watchdog.py would cry wolf.
+    refresh_spt_data(log=log)
 
     tips = parse_todays_emails()
     if not tips:

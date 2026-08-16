@@ -118,11 +118,50 @@ def _row_rank(row):
             1 if row.get('source') == 'active' else 0)
 
 
-def scrape_spt_stock(stock_name, category, log=_clog):
-    """Look up one tip's Type/Target/Timeframe/Have-Interest.
+def refresh_spt_data(log=_clog):
+    """Log in, scrape every section once, cache the result for this process,
+    and write the liveness watermark if anything was genuinely read.
 
-    Called per-tip by main_recommend.py's cron run, so the login and the
-    six-section scrape happen once and are cached for the rest of the process.
+    main_recommend.py calls this once per run BEFORE looking at tips, so the
+    watermark is a true daily heartbeat: on a market holiday no tips arrive,
+    and if the watermark were only written as a side effect of a tip lookup,
+    spt_watchdog.py would report a dead scraper on every holiday.
+
+    Returns True if at least one section was read. Never raises."""
+    global _run_cache
+
+    if _run_cache is not None:
+        return _run_cache['ok']
+
+    username = os.environ.get('SPT_USERNAME', '')
+    password = os.environ.get('SPT_PASSWORD', '')
+    try:
+        session = login_session(username, password, log=log)
+        results = scrape_all_categories(session, log=log)
+    except (SPTLoginError, SPTScrapeError, requests.RequestException) as e:
+        log(f"  SPTulsian scrape unavailable ({e}) — continuing without "
+            f"target/timeframe; spt_watchdog.py will flag this")
+        _run_cache = {'index': {}, 'ok': False}
+        return False
+
+    ok_sections = [c for c, r in results.items() if not r.get('error')]
+    total_rows = sum(len(r.get('rows', [])) for r in results.values())
+    _run_cache = {'index': _lookup_index(results), 'ok': bool(ok_sections)}
+
+    if ok_sections:
+        # Watermark ONLY on a genuinely parsed scrape — never on a mere
+        # attempt. That is the whole point: a metric a failed fetch cannot
+        # satisfy. Judging freshness off the newest call instead would
+        # false-alarm on a genuinely quiet week.
+        write_watermark(sections_ok=ok_sections, rows=total_rows, log=log)
+    else:
+        log("  SPTulsian: no section could be read — watermark not written")
+    return _run_cache['ok']
+
+
+def scrape_spt_stock(stock_name, category, log=_clog):
+    """Look up one tip's Type/Target/Timeframe/Have-Interest, from the cache
+    primed by refresh_spt_data() (called lazily here if it has not run yet).
 
     Returns blanks rather than raising if anything fails: recording the
     recommendation and resolving its symbol matters more than the target, and
@@ -130,36 +169,9 @@ def scrape_spt_stock(stock_name, category, log=_clog):
     still made loud — it is logged, and the liveness watermark is NOT written,
     which is what spt_watchdog.py alerts on. Never returns a stale-but-
     plausible-looking result on failure."""
-    global _run_cache
-
     blank = {'type': '', 'target': '', 'timeframe': '', 'have_interest': ''}
 
-    if _run_cache is None:
-        username = os.environ.get('SPT_USERNAME', '')
-        password = os.environ.get('SPT_PASSWORD', '')
-        try:
-            session = login_session(username, password, log=log)
-            results = scrape_all_categories(session, log=log)
-        except (SPTLoginError, SPTScrapeError, requests.RequestException) as e:
-            log(f"  SPTulsian scrape unavailable ({e}) — continuing without "
-                f"target/timeframe; spt_watchdog.py will flag this")
-            _run_cache = {'index': {}, 'ok': False}
-            return blank
-
-        ok_sections = [c for c, r in results.items() if not r.get('error')]
-        total_rows = sum(len(r.get('rows', [])) for r in results.values())
-        _run_cache = {'index': _lookup_index(results), 'ok': bool(ok_sections)}
-
-        if ok_sections:
-            # Watermark ONLY on a genuinely parsed scrape — never on a mere
-            # attempt. That is the whole point: a metric a failed fetch cannot
-            # satisfy. Judging freshness off the newest call instead would
-            # false-alarm on a genuinely quiet week.
-            write_watermark(sections_ok=ok_sections, rows=total_rows, log=log)
-        else:
-            log("  SPTulsian: no section could be read — watermark not written")
-
-    if not _run_cache['ok']:
+    if not refresh_spt_data(log=log):
         return blank
 
     row = _run_cache['index'].get((_norm_name(category), _norm_name(stock_name)))
