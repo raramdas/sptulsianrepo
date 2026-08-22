@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timedelta
 
 from config import log, GTT_DRY_RUN, IST
-from kite_client import get_enctoken_for, place_gtt, get_gtt_detail
+from kite_client import get_enctoken_for, place_gtt, get_gtt_detail, get_market_price
 from order_status import get_order_status, find_sell_order_for_symbol
 from budget_manager import (
     get_open_trades_with_target, get_open_trades_with_gtt,
@@ -77,7 +77,8 @@ def run_for_tenant(tenant, conn):
                 gtt_placed += 1
             else:
                 try:
-                    gtt_id = place_gtt(kite_symbol, filled_qty, target, None, enctoken)
+                    ltp = get_market_price(stock, enctoken, kite_symbol=kite_symbol)
+                    gtt_id = place_gtt(kite_symbol, filled_qty, target, ltp, enctoken)
                     log(f"  GTT placed: {gtt_id}")
                     set_gtt_placed_oracle(conn, trade_id, gtt_id)
                     gtt_placed += 1
@@ -179,7 +180,8 @@ def run_for_tenant(tenant, conn):
                 log(f"  [DRY RUN] Would recreate GTT SELL {qty} x {sell_symbol} @ {target}")
             else:
                 try:
-                    new_gtt_id = place_gtt(sell_symbol, qty, float(target), None, enctoken)
+                    ltp = get_market_price(stock, enctoken, kite_symbol=sell_symbol)
+                    new_gtt_id = place_gtt(sell_symbol, qty, float(target), ltp, enctoken)
                     set_gtt_placed_oracle(conn, trade_id, new_gtt_id, note=note)
                     log(f"  New GTT placed: {new_gtt_id}")
                 except Exception as e:
