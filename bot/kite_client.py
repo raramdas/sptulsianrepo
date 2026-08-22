@@ -200,6 +200,18 @@ def place_gtt(symbol, qty, target_price, last_price, enctoken):
 
     Kite requires that for a sell GTT, last_price must be BELOW the trigger_price.
     If we couldn't fetch a real market price, derive a safe last_price below trigger.
+
+    NOTE: this is an OLDER implementation than lib/kite_client.place_gtt and has
+    not been brought forward. It differs in two ways that matter:
+      - trigger is a flat 3% below target, not target minus an offset rounded
+        to the instrument's tick size. Kite rejects triggers that are not an
+        exact multiple of tick size ("Trigger price should be a multiple of
+        tick size X"), which the lib/ version handles and this one does not.
+      - the synthetic last_price is 2% below trigger, which happens to clear
+        Kite's ~Rs 0.09 absolute floor, so it does not hit the low-priced-stock
+        rejection the lib/ version was fixed for.
+    bot/ is not in the crontab. Port lib/kite_client.place_gtt before scheduling
+    anything here.
     """
     trigger_price = round(target_price * 0.97, 2)
     if not last_price or last_price >= trigger_price:
