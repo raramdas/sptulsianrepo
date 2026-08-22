@@ -338,28 +338,35 @@ def update_trade_after_buy_attempt(trade_id, status, category_id=None, symbol=No
         log(f"  update_trade_after_buy_attempt error: {e}")
 
 
-def get_open_trades_with_target(scan_dates):
-    """Open trades with a target price set, no GTT placed yet, within the scan date window."""
+def get_open_trades_with_target(scan_dates=None):
+    """Every open trade that has a target price but no GTT yet.
+
+    NOT restricted by buy_date. A target can be set long after the buy — from
+    the dashboard's Set Targets page or spt_capture.py — and the old
+    buy_date-in-scan_dates filter meant those trades were never seen by this
+    job at all: 19 open positions had a target and no GTT, none of them inside
+    the 2-day window, so none would ever have been protected.
+
+    scan_dates is accepted and ignored, so existing callers keep working.
+    """
     conn = get_oracle_connection()
     if not conn:
         return []
     try:
         cursor = conn.cursor()
-        placeholders = ",".join(f":d{i}" for i in range(len(scan_dates)))
-        params = {f"d{i}": d for i, d in enumerate(scan_dates)}
         # Oracle treats '' as NULL, so `x NOT IN ('', 'DRY_RUN')` silently
-        # becomes `x NOT IN (NULL, 'DRY_RUN')` — which is never true for any
-        # x, matching zero rows always. buy_order_id IS NOT NULL above
-        # already excludes NULL/empty, so only 'DRY_RUN' needs excluding here.
-        cursor.execute(f"""
+        # becomes `x NOT IN (NULL, 'DRY_RUN')` — never true for any x, matching
+        # zero rows always. buy_order_id IS NOT NULL already excludes
+        # NULL/empty, so only 'DRY_RUN' needs excluding here.
+        cursor.execute("""
             SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
                    target_price, buy_order_id, my_buy_qty
             FROM trades
             WHERE status = 'Open' AND target_price IS NOT NULL AND gtt_id IS NULL
-              AND TO_CHAR(buy_date, 'YYYY-MM-DD') IN ({placeholders})
               AND buy_order_id IS NOT NULL
               AND buy_order_id <> 'DRY_RUN'
-        """, params)
+            ORDER BY buy_date DESC, trade_id DESC
+        """)
         cols = [d[0].lower() for d in cursor.description]
         rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
         cursor.close()
@@ -433,6 +440,30 @@ def mark_trade_error_oracle(trade_id, message):
         cursor.close()
     except Exception as e:
         log(f"  mark_trade_error_oracle error: {e}")
+
+
+def mark_gtt_failure_oracle(trade_id, message):
+    """Record a GTT PLACEMENT failure without changing status.
+
+    Deliberately not mark_trade_error_oracle(): that sets status='ERROR',
+    and get_open_trades_with_target() only selects status='Open'. A failed
+    placement would therefore drop out of the retry set permanently, leaving
+    an open holding with no sell trigger and nothing to signal it. The
+    position is fine — only the placement failed — so it stays Open and is
+    retried on the next run, with the reason kept in notes."""
+    conn = get_oracle_connection()
+    if not conn:
+        return
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE trades SET notes = :msg, updated_at = SYSTIMESTAMP
+            WHERE trade_id = :id
+        """, {'msg': f'GTT placement retry pending — {message}', 'id': trade_id})
+        conn.commit()
+        cursor.close()
+    except Exception as e:
+        log(f"  mark_gtt_failure_oracle error: {e}")
 
 
 def close_trade_in_oracle(buy_order_id, target_met_date, sell_price=None, sell_qty=None):

@@ -20,11 +20,12 @@ import re
 from datetime import datetime, timedelta
 
 from lib.config import log, GTT_DRY_RUN, IST
-from lib.kite_client import get_enctoken, place_gtt, get_gtt_detail
+from lib.kite_client import get_enctoken, place_gtt, get_gtt_detail, get_market_price
 from lib.order_status import get_order_status, find_sell_order_for_symbol
 from lib.budget_manager import (
     get_open_trades_with_target, get_open_trades_with_gtt,
-    set_gtt_placed_oracle, mark_trade_error_oracle, close_trade_in_oracle,
+    set_gtt_placed_oracle, mark_trade_error_oracle, mark_gtt_failure_oracle,
+    close_trade_in_oracle,
     close_oracle_connection,
 )
 
@@ -84,13 +85,23 @@ def run():
                 gtt_placed += 1
             else:
                 try:
-                    gtt_id = place_gtt(kite_symbol, filled_qty, target, None, enctoken)
+                    # Pass the REAL last price. Passing None makes place_gtt
+                    # synthesise one just below its own trigger, which Kite
+                    # rejects as "too close" on cheap stocks even when the
+                    # actual market price is nowhere near the target.
+                    ltp = get_market_price(stock, enctoken, kite_symbol=kite_symbol)
+                    gtt_id = place_gtt(kite_symbol, filled_qty, target, ltp, enctoken)
                     log(f"  GTT placed: {gtt_id}")
                     set_gtt_placed_oracle(trade_id, gtt_id)
                     gtt_placed += 1
                 except Exception as e:
-                    log(f"  GTT error: {e}")
-                    mark_trade_error_oracle(trade_id, str(e))
+                    # A GTT that fails to PLACE is not a bad trade — the
+                    # position is open and still needs protection. Marking it
+                    # ERROR drops it out of get_open_trades_with_target()
+                    # forever, silently leaving the holding with no sell
+                    # trigger. Keep it Open so the next run retries.
+                    log(f"  GTT error (position left Open for retry): {e}")
+                    mark_gtt_failure_oracle(trade_id, str(e))
                     gtt_skipped += 1
 
         elif kite_status in ('OPEN', 'TRIGGER PENDING', 'AMO REQ RECEIVED'):
@@ -191,7 +202,8 @@ def run():
                 log(f"  [DRY RUN] Would recreate GTT SELL {qty} x {sell_symbol} @ {target}")
             else:
                 try:
-                    new_gtt_id = place_gtt(sell_symbol, qty, float(target), None, enctoken)
+                    ltp = get_market_price(stock, enctoken, kite_symbol=sell_symbol)
+                    new_gtt_id = place_gtt(sell_symbol, qty, float(target), ltp, enctoken)
                     set_gtt_placed_oracle(trade_id, new_gtt_id, note=note)
                     log(f"  New GTT placed: {new_gtt_id}")
                 except Exception as e:

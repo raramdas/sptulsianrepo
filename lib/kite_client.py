@@ -283,22 +283,30 @@ def place_gtt(symbol, qty, target_price, last_price, enctoken):
     it's never below the tick-floored trigger).
 
     Kite ALSO requires last_price to differ from trigger_price by MORE
-    THAN 0.25% (and, for a sell GTT, last_price must be below trigger_price).
-    We use a 0.5% margin — safely above that 0.25% floor — rather than a
-    flat rupee amount, since a flat Rs 0.10 gap is well under 0.25% for
-    almost any stock priced above ~Rs 40.
+    THAN 0.25% (and, for a sell GTT, last_price must be below trigger_price),
+    subject to an absolute floor of about Rs 0.09. PASS THE REAL LAST PRICE:
+    callers that pass None force the synthetic fallback below, which is
+    strictly worse than the truth and has its own failure mode.
+
+    The percentage margin alone is not enough on cheap stocks. At a trigger
+    of Rs 15.09 (Vodafone Idea), 0.5% is Rs 0.08 — under Kite's ~0.09 floor —
+    so the request was rejected as "too close" even though the real market
+    price was Rs 1.02 away and would have been accepted. Any stock priced
+    under roughly Rs 17 hit this. Hence MIN_GAP_ABS.
     """
     tick_size = get_tick_size(symbol)
     GTT_OFFSET = 0.10
+    MIN_GAP_ABS = 0.15   # comfortably above Kite's ~0.09 absolute floor
     trigger_price = _round_to_tick(target_price - GTT_OFFSET, tick_size, mode='floor')
     limit_price = _round_to_tick(target_price, tick_size, mode='ceil')
 
-    min_gap = round(trigger_price * 0.005, 2)  # 0.5% margin, above Kite's 0.25% minimum
+    # 0.5% margin (above Kite's 0.25% rule) but never below the absolute floor.
+    min_gap = max(round(trigger_price * 0.005, 2), MIN_GAP_ABS)
     if not last_price or (trigger_price - last_price) < min_gap:
         original = last_price
         last_price = round(trigger_price - min_gap, 2)
         log(f"  Adjusted last_price from {original} to {last_price} "
-            f"(needed >0.25% gap from trigger {trigger_price}, using 0.5% margin)")
+            f"(need a >{min_gap} gap below trigger {trigger_price})")
     log(f"  GTT: tick_size={tick_size} trigger={trigger_price} limit={limit_price} last_price={last_price}")
     orders = json.dumps([{
         'exchange': EXCHANGE, 'tradingsymbol': symbol,
