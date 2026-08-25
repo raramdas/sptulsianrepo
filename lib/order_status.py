@@ -66,18 +66,47 @@ def get_holding_qty(symbol, enctoken):
     return 0
 
 
-def find_sell_order_for_symbol(symbol, qty, enctoken):
-    """Fallback: scan today's order book for a SELL/CNC order matching the
-    symbol (and ideally quantity), used when a GTT's `result` field doesn't
-    carry an order_id we can query directly. Returns the same dict shape as
-    get_order_status(), or None."""
+def find_sell_order_for_symbol(symbol, qty, enctoken, min_price=None, exclude_order_ids=()):
+    """Fallback: scan the order book for the SELL/CNC order produced by a
+    GTT, used when the GTT's own `result` carries no order_id to query.
+
+    Two guards, both added after this matched the WRONG order and closed a
+    live position at a fictional price:
+
+    min_price — a sell LIMIT cannot fill below its limit. Two IDEA trades were
+      held at once, one with a 14.00 limit and one with 15.20. Matching on
+      symbol+quantity alone (both were 354 shares) attributed the 14.09 fill
+      to BOTH, booking the 15.20 trade as closed at 14.09 for an invented
+      loss. Passing the trade's own limit rejects a fill that cannot be its.
+
+    exclude_order_ids — one fill belongs to one trade. Without this, a single
+      sell closes every open lot of the same size in the same symbol.
+
+    Symbol and quantity are NOT sufficient identity. Prefer the GTT's own
+    order_id whenever it is available; this is the last resort.
+    """
     orders = get_all_orders(enctoken)
+    excluded = {str(x) for x in (exclude_order_ids or ())}
     candidates = [
         o for o in orders
         if o.get('tradingsymbol', '').upper() == symbol.upper()
         and o.get('transaction_type') == 'SELL'
         and o.get('product') == 'CNC'
+        and str(o.get('order_id', '')) not in excluded
     ]
+    if min_price:
+        # Allow a small tolerance for tick rounding, but nothing that could
+        # confuse one limit with a materially lower one.
+        floor = float(min_price) * 0.98
+        kept = []
+        for o in candidates:
+            avg = float(o.get('average_price', 0) or 0)
+            if avg <= 0 or avg >= floor:
+                kept.append(o)
+            else:
+                log(f"  Ignoring sell {o.get('order_id')} @ {avg} — below this "
+                    f"trade's limit {min_price}, so it belongs to another lot")
+        candidates = kept
     if not candidates:
         return None
     exact = [o for o in candidates if int(o.get('quantity', 0)) == qty]
@@ -89,6 +118,7 @@ def find_sell_order_for_symbol(symbol, qty, enctoken):
         'filled_qty': int(o.get('filled_quantity', 0)),
         'avg_price':  float(o.get('average_price', 0) or 0),
         'symbol':     o.get('tradingsymbol', ''),
+        'order_id':   str(o.get('order_id', '')),
     }
 
 

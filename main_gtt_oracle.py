@@ -131,6 +131,9 @@ def run():
     active_gtts = get_open_trades_with_gtt()
     log(f"Checking {len(active_gtts)} active GTT(s) for triggers")
 
+    # One fill belongs to one trade. Without this, several lots of the same
+    # symbol and size all match the same sell and every one of them closes.
+    consumed_sell_orders = set()
     gtt_recreated = 0
     for t in active_gtts:
         trade_id = t['trade_id']
@@ -167,10 +170,20 @@ def run():
         for o in detail.get('orders', []):
             result = o.get('result')
             if result and result.get('order_id'):
-                filled_order = get_order_status(result['order_id'], enctoken)
+                oid = str(result['order_id'])
+                if oid in consumed_sell_orders:
+                    break            # already closed another lot
+                filled_order = get_order_status(oid, enctoken)
+                if filled_order:
+                    filled_order.setdefault('order_id', oid)
                 break
         if not filled_order and qty and sell_symbol:
-            filled_order = find_sell_order_for_symbol(sell_symbol, qty, enctoken)
+            # Guarded fallback: the fill must be at or above THIS trade's own
+            # limit, and must not already have closed another lot.
+            filled_order = find_sell_order_for_symbol(
+                sell_symbol, qty, enctoken,
+                min_price=target,
+                exclude_order_ids=consumed_sell_orders)
 
         sold_ok = bool(filled_order and filled_order['status'] == 'COMPLETE'
                         and filled_order['filled_qty'] > 0)
@@ -183,6 +196,8 @@ def run():
                 close_trade_in_oracle(buy_oid, datetime.now(IST).date(),
                                       sell_price=filled_order.get('avg_price'),
                                       sell_qty=filled_order['filled_qty'])
+            if filled_order.get('order_id'):
+                consumed_sell_orders.add(str(filled_order['order_id']))
             gtt_closed += 1
             log(f"  {stock} marked Closed — GTT {gtt_st}, sell CONFIRMED filled "
                 f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")

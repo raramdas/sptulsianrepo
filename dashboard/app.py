@@ -204,8 +204,9 @@ def page_overview():
                 d['quantity'] = d['quantity'].astype(int)
                 # Holdings are per symbol, conviction is per trade — map on
                 # symbol and show the most recent read on that company.
-                d['conviction'] = (d['symbol'].astype(str).str.upper().map(conv_map)
-                                   .apply(theme.conviction_badge))
+                d.insert(1, 'conviction',
+                         d['symbol'].astype(str).str.upper().map(conv_map)
+                          .apply(theme.conviction_badge))
                 st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
 
             if tagged.empty:
@@ -379,8 +380,9 @@ def page_drilldown():
             money_cols = ['average_cost', 'last_price', 'current_value', 'pnl']
             d = cat_holdings[display_cols].rename(columns={'average_price': 'average_cost', 'account_label': 'account'}).copy()
             d['quantity'] = d['quantity'].astype(int)
-            d['conviction'] = (d['symbol'].astype(str).str.upper().map(conv_map)
-                               .apply(theme.conviction_badge))
+            d.insert(1, 'conviction',
+                     d['symbol'].astype(str).str.upper().map(conv_map)
+                      .apply(theme.conviction_badge))
             st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
         st.caption("From the last Kite sync — click 'Sync Kite Data' on Overview to refresh. For full trade "
                    "history in this category (including closed/error/skipped), use Trades Explorer.")
@@ -441,6 +443,11 @@ def _render_trades_table(tdf):
     money_cols = ['my_buy_price', 'invested_amount', 'target_price', 'my_sell_price', 'my_gain_loss']
     hidden = ('trade_id', 'notes', 'conviction_tier', 'conviction_verdict')
     display_cols = [c for c in tdf.columns if c not in hidden]
+    # Conviction sits next to the stock it describes, rather than trailing the
+    # row where it reads as an afterthought.
+    if 'conviction' in display_cols and 'stock_name' in display_cols:
+        display_cols.remove('conviction')
+        display_cols.insert(display_cols.index('stock_name') + 1, 'conviction')
     st.markdown(theme.render_table(tdf[display_cols], money_cols=money_cols, status_col='status',
                                    status_class_col='_status_raw', gain_col='my_gain_loss'),
                 unsafe_allow_html=True)
@@ -503,8 +510,8 @@ def page_recommendations():
     display['SPT Interest'] = df['have_interest'].fillna('').replace('', '—')
     st.caption(f"{len(display)} recommendation(s)")
     st.markdown(
-        theme.render_table(display[['Date', 'Stock', 'Purchase Price', 'Target Price',
-                                    'Conviction', 'SPT Interest', 'Status', '_status_raw']],
+        theme.render_table(display[['Date', 'Stock', 'Conviction', 'Purchase Price',
+                                    'Target Price', 'SPT Interest', 'Status', '_status_raw']],
                            money_cols=['Purchase Price', 'Target Price'], status_col='Status',
                            status_class_col='_status_raw'),
         unsafe_allow_html=True
