@@ -211,6 +211,37 @@ def reconcile_pending_fills(enctoken):
                                            invested_amount=0, notes=note)
 
 
+def _log_gate_summary(considered):
+    """Separate skips caused by the CALL from skips caused by US.
+
+    Both gates now depend on our own pipeline: a failed scrape leaves
+    have_interest blank, and a failed conviction run leaves no score. Either
+    silently stops buying, and the trade log alone reads the same as a day
+    when nothing was worth buying. Over a recent 10-day window, 8 of 29
+    recommendations were skipped for infrastructure reasons rather than
+    merit — including the two highest-scoring calls in the window. Surface
+    that difference so a quiet day is distinguishable from a broken one.
+    """
+    infra = merit = 0
+    for t in considered:
+        _, reason = decide_position_size(t)
+        if not reason:
+            continue
+        if 'No conviction score on file' in reason or 'blank (no matching live call' in reason:
+            infra += 1
+        else:
+            merit += 1
+    if merit:
+        log(f"Skipped {merit} recommendation(s) on their merits (no interest / low conviction)")
+    if infra:
+        log("")
+        log(f"  *** {infra} recommendation(s) were skipped because OUR PIPELINE had no data,")
+        log(f"      not because the call was judged weak. A missing SPTulsian scrape or a")
+        log(f"      missing conviction score blocks the buy. Check:")
+        log(f"        python3 spt_watchdog.py --check-only")
+        log(f"        tail -40 /home/ubuntu/conviction.log")
+
+
 def run():
     log("=== Stock Tip Bot — Buy Phase starting ===")
     log(f"Mode: {'DRY RUN' if DRY_RUN else 'LIVE'}")
@@ -247,6 +278,7 @@ def run():
             log(f"ERROR {trade['stock_name']}: {e}")
             update_trade_after_buy_attempt(trade['trade_id'], 'ERROR', notes=str(e))
 
+    _log_gate_summary(to_buy)
     close_oracle_connection()
     log("=== Buy Phase complete ===")
 
