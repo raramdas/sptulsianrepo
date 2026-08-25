@@ -40,6 +40,18 @@ REQUIRE_HAVE_INTEREST = True # skip unless SPTulsian discloses "Have Interest"
 # so a call is not lost just because the price never came back that session.
 # Total attempts = 1 initial + BUY_RETRY_DAYS retries.
 BUY_RETRY_DAYS = 2
+
+# Skips caused by OUR pipeline having no data — a scrape that found no live
+# call (blank have_interest) or a conviction run that never scored the trade —
+# are NOT a judgement on the recommendation. They are retried on later days
+# within BUY_RETRY_DAYS, so an outage costs a day rather than the opportunity.
+#
+# This matters: over one 10-day sample, 8 of 29 recommendations were skipped
+# for infrastructure reasons, including the only two that scored high enough
+# for the top position size. It also makes the watchdog's alert actionable —
+# alerting on a trade that has already been permanently skipped is useless.
+# Set False to go back to skipping immediately on unknown.
+RETRY_ON_UNKNOWN = True
 DRY_RUN    = False
 GTT_DRY_RUN = False   # Independent DRY_RUN flag for the GTT/sell-side bot
 TEST_DATE  = None   # Set to None for live email date

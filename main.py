@@ -14,7 +14,8 @@ import math
 from datetime import datetime
 
 from lib.config import (log, DRY_RUN, IST, INVEST_AMT, CONVICTION_SIZING,
-                        CONVICTION_MIN_SCORE, REQUIRE_HAVE_INTEREST, BUY_RETRY_DAYS)
+                        CONVICTION_MIN_SCORE, REQUIRE_HAVE_INTEREST, BUY_RETRY_DAYS,
+                        RETRY_ON_UNKNOWN)
 from lib.kite_client import get_enctoken, resolve_kite_symbol, get_market_price, kite_buy
 from lib.order_status import get_order_status
 from lib.budget_manager import (
@@ -26,7 +27,12 @@ from lib.sheet_logger import log_to_sheet
 
 
 def decide_position_size(trade):
-    """Apply the buy gates and return (invest_amt, reason_if_skipped).
+    """Apply the buy gates. Returns (invest_amt, reason, retryable).
+
+    `retryable` is True when the skip reflects OUR pipeline having no data
+    rather than a judgement on the call — a blank have_interest (the scrape
+    found no live call to match) or a trade the conviction run never scored.
+    Those are retried; 'No Interest' and a genuine low score are not.
 
     Two gates, both hard:
 
@@ -43,27 +49,34 @@ def decide_position_size(trade):
     if REQUIRE_HAVE_INTEREST:
         hi = (trade.get('have_interest') or '').strip()
         if hi != 'Have Interest':
-            shown = hi or 'blank (no matching live call found)'
-            return None, f'SPTulsian does not disclose Have Interest — {shown}'
+            if not hi:
+                # Unknown, not refused: the scrape found no live call to match.
+                return None, ('SPTulsian interest unknown — no matching live call '
+                              'found by the scrape'), True
+            return None, f'SPTulsian discloses No Interest in this stock', False
 
     conv = get_latest_conviction(trade['trade_id'])
     if conv is None:
+        # The scoring job did not run or did not reach this trade — unknown,
+        # not weak. Retryable.
         return None, ('No conviction score on file — main_conviction.py did not '
-                      'score this trade, so there is no basis to size it')
+                      'score this trade, so there is no basis to size it'), True
     score = conv.get('score')
     if score is None:
+        # Engine deliberately withheld a composite for lack of evidence. That
+        # IS a judgement, and re-running tomorrow will not conjure evidence.
         return None, (f"Conviction withheld ({conv.get('verdict')}, evidence "
-                      f"{conv.get('evidence_pct')}/100) — too little evidence to size")
+                      f"{conv.get('evidence_pct')}/100) — too little evidence to size"), False
     if score < CONVICTION_MIN_SCORE:
         return None, (f'Conviction {score:.1f} is below the '
-                      f'{CONVICTION_MIN_SCORE}-point floor')
+                      f'{CONVICTION_MIN_SCORE}-point floor'), False
 
     for floor, amount in CONVICTION_SIZING:
         if score > floor:
-            return amount, None
+            return amount, None, False
     # Score is at or above the floor but not above any band's threshold, i.e.
     # exactly CONVICTION_MIN_SCORE — take the lowest band.
-    return CONVICTION_SIZING[-1][1], None
+    return CONVICTION_SIZING[-1][1], None, False
 
 
 def attempt_buy(trade, enctoken):
@@ -77,8 +90,19 @@ def attempt_buy(trade, enctoken):
     attempts = int(trade.get('buy_attempts') or 0)
     log(f"Trade #{trade_id}: {stock} ({symbol})" + (f" [attempt {attempts + 1}]" if attempts else ""))
 
-    invest_amt, skip_reason = decide_position_size(trade)
+    invest_amt, skip_reason, retryable = decide_position_size(trade)
     if skip_reason:
+        # An outage is not a verdict. When the pipeline simply had no data,
+        # leave the trade queued so a later run can buy it once the data
+        # arrives — rather than burning the opportunity on our own downtime.
+        if retryable and RETRY_ON_UNKNOWN and attempts < BUY_RETRY_DAYS:
+            note = f'{skip_reason} — will retry ({attempts + 1} of {BUY_RETRY_DAYS})'
+            log(f"HOLDING {stock} — {note}")
+            requeue_for_retry(trade_id, attempts + 1, note)
+            return
+        if retryable:
+            skip_reason = (f'{skip_reason} — no retries left after '
+                           f'{attempts} attempt(s)')
         log(f"SKIPPING {stock} — {skip_reason}")
         update_trade_after_buy_attempt(trade_id, 'SKIPPED', symbol=symbol,
                                        stock_type=cap_type, notes=skip_reason)
@@ -224,10 +248,10 @@ def _log_gate_summary(considered):
     """
     infra = merit = 0
     for t in considered:
-        _, reason = decide_position_size(t)
+        _, reason, retryable = decide_position_size(t)
         if not reason:
             continue
-        if 'No conviction score on file' in reason or 'blank (no matching live call' in reason:
+        if retryable:
             infra += 1
         else:
             merit += 1
@@ -235,9 +259,9 @@ def _log_gate_summary(considered):
         log(f"Skipped {merit} recommendation(s) on their merits (no interest / low conviction)")
     if infra:
         log("")
-        log(f"  *** {infra} recommendation(s) were skipped because OUR PIPELINE had no data,")
-        log(f"      not because the call was judged weak. A missing SPTulsian scrape or a")
-        log(f"      missing conviction score blocks the buy. Check:")
+        log(f"  *** {infra} recommendation(s) were HELD because OUR PIPELINE had no data,")
+        log(f"      not because the call was judged weak. They stay queued and are")
+        log(f"      retried for up to {BUY_RETRY_DAYS} more day(s). Fix the cause today:")
         log(f"        python3 spt_watchdog.py --check-only")
         log(f"        tail -40 /home/ubuntu/conviction.log")
 

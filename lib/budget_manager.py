@@ -447,6 +447,67 @@ def mark_trade_error_oracle(trade_id, message):
         log(f"  mark_trade_error_oracle error: {e}")
 
 
+def unscored_pending_buys():
+    """Trades awaiting purchase that main_conviction.py has not scored.
+
+    This is the direct check, not a proxy: the buy run refuses to size an
+    unscored trade, so every row here is a buy that will not happen. A
+    "conviction job ran" signal would not catch a run that succeeded overall
+    but failed on these particular symbols.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT t.trade_id, t.stock_name, t.symbol,
+                   TO_CHAR(t.buy_date, 'YYYY-MM-DD') AS buy_date
+            FROM trades t
+            WHERE t.status IN ('PENDING_BUY', 'NEEDS_REVIEW')
+              AND t.buy_date >= TRUNC(SYSDATE) - 3
+              AND NOT EXISTS (SELECT 1 FROM conviction_scores c
+                              WHERE c.trade_id = t.trade_id)
+            ORDER BY t.buy_date, t.trade_id
+        """)
+        cols = [d[0].lower() for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+    except Exception as e:
+        log(f"  unscored_pending_buys error: {e}")
+        return []
+
+
+def pending_buys_missing_interest():
+    """Trades awaiting purchase where the scrape left have_interest blank.
+
+    Blank is 'unknown', and the buy gate holds rather than buys — so these
+    are buys deferred by a scrape gap, not by the advisory's judgement.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT trade_id, stock_name, symbol,
+                   TO_CHAR(buy_date, 'YYYY-MM-DD') AS buy_date
+            FROM trades
+            WHERE status IN ('PENDING_BUY', 'NEEDS_REVIEW')
+              AND buy_date >= TRUNC(SYSDATE) - 3
+              AND (have_interest IS NULL OR TRIM(have_interest) IS NULL)
+            ORDER BY buy_date, trade_id
+        """)
+        cols = [d[0].lower() for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+    except Exception as e:
+        log(f"  pending_buys_missing_interest error: {e}")
+        return []
+
+
 def get_latest_conviction(trade_id):
     """Newest conviction row for a trade, or None if it was never scored.
 
