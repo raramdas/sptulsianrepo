@@ -254,7 +254,9 @@ def report(df, log=print):
             sub = df[df[col].notna()]
             if len(sub) < 5:
                 continue
-            sp = sub[col].corr(sub['excess_pct'], method='spearman')
+            # Spearman computed as Pearson on ranks — pandas' 'spearman'
+            # pulls in scipy, which is heavy for a 956MB box.
+            sp = sub[col].rank().corr(sub['excess_pct'].rank(), method='pearson')
             pe = sub[col].corr(sub['excess_pct'], method='pearson')
             log(f"\n  {label}: n={len(sub)}  Spearman={sp:+.3f}  Pearson={pe:+.3f}")
             log(f"    {'positive = higher score went with better excess return' if sp > 0 else 'NEGATIVE = the score ran against outcomes'}")
