@@ -14,8 +14,8 @@ import math
 from datetime import datetime
 
 from lib.config import (log, DRY_RUN, IST, INVEST_AMT, CONVICTION_SIZING,
-                        CONVICTION_MIN_SCORE, REQUIRE_HAVE_INTEREST, BUY_RETRY_DAYS,
-                        RETRY_ON_UNKNOWN)
+                        CONVICTION_SIZING_ENABLED, CONVICTION_MIN_SCORE,
+                        REQUIRE_HAVE_INTEREST, BUY_RETRY_DAYS, RETRY_ON_UNKNOWN)
 from lib.kite_client import get_enctoken, resolve_kite_symbol, get_market_price, kite_buy
 from lib.order_status import get_order_status
 from lib.budget_manager import (
@@ -28,6 +28,10 @@ from lib.sheet_logger import log_to_sheet
 
 def decide_position_size(trade):
     """Apply the buy gates. Returns (invest_amt, reason, retryable).
+
+    Conviction sizing/gating is currently OFF: every accepted buy gets the
+    flat INVEST_AMT. The SPTulsian "Have Interest" gate is unaffected — that
+    is the advisory's own disclosure, not our score.
 
     `retryable` is True when the skip reflects OUR pipeline having no data
     rather than a judgement on the call — a blank have_interest (the scrape
@@ -54,6 +58,12 @@ def decide_position_size(trade):
                 return None, ('SPTulsian interest unknown — no matching live call '
                               'found by the scrape'), True
             return None, f'SPTulsian discloses No Interest in this stock', False
+
+    if not CONVICTION_SIZING_ENABLED:
+        # Flat sizing. The score is still computed and displayed, but the
+        # backtest found nothing to justify letting it decide how much — or
+        # whether — to buy. See lib/config.CONVICTION_SIZING_ENABLED.
+        return INVEST_AMT, None, False
 
     conv = get_latest_conviction(trade['trade_id'])
     if conv is None:

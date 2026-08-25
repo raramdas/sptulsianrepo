@@ -4,18 +4,16 @@ main_conviction.py — scores today's recommendations against public evidence
 and records the result. Runs between the 9:30 recommend job and the 11:00
 buy job, so the assessment is on the dashboard before any money moves.
 
-THIS SCORE NOW MOVES MONEY. It was display-only until 2026-08-25; the buy
-path (main.py) now reads it to decide both WHETHER to buy and HOW MUCH:
+DISPLAY ONLY, again. This score briefly sized and gated real orders
+(2026-08-25 to 2026-08-26). The first backtest found no relationship between
+it and subsequent excess return — symbol-level Spearman -0.127 over 37
+symbols — so sizing reverted to a flat amount and the score is
+informational: shown on the dashboard, recorded for the track record, and
+not consulted by the buy path.
 
-    score > 85        Rs 25,000
-    75 <= score <= 85 Rs 10,000
-    score < 75        not bought
-    no score at all   not bought
-
-So a scoring bug, a data-source outage, or a silently wrong metric is a
-money bug, not a cosmetic one. This job still only writes conviction_scores
-— it never touches trades — but main.py will refuse to buy anything this
-job failed to score. If it does not run, nothing is bought that day.
+It writes conviction_scores and nothing else. If this job fails, buying is
+unaffected; only visibility is lost. See lib/config.CONVICTION_SIZING_ENABLED
+and backtest_conviction.py before wiring it back into sizing.
 
 By default it scores trades awaiting purchase (PENDING_BUY, NEEDS_REVIEW,
 PENDING_FILL) from the last few days, so retries are re-scored rather than

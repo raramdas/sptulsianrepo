@@ -305,8 +305,15 @@ than reporting nothing.
 
 **The engine is display-only.** `main_conviction.py` writes to
 `CONVICTION_SCORES` and nothing else. It cannot size a position or stop a buy.
-This is deliberate: the scores must be checkable against known outcomes before
-anyone considers wiring them into sizing.
+
+That caution was warranted. Sizing was briefly wired to the score on
+2026-08-25 (>85 → ₹25,000, 75–85 → ₹10,000, below 75 not bought) and reverted
+the next day: `backtest_conviction.py`, rebuilding scores point-in-time and
+measuring excess return against NIFTY, found **no detectable relationship** —
+symbol-level Spearman −0.127 across 37 symbols (t = −0.76). The band that
+would have taken most of the capital performed worst. Two months and 12
+realised closes prove nothing either way, which is the point: there was no
+evidence for a rule that was spending money.
 
 *Validation:* backfilled across all 86 open positions, it independently flagged
 both trades already known to be mistakes — `ICDSLTD` (illiquid, ₹0.00 crore/day)
@@ -423,9 +430,9 @@ These hold by construction and should be preserved by any future change:
    `NEEDS_REVIEW` and waits for a human.
 3. A trade is `Closed` only on a **confirmed** sell fill, never on a GTT status
    alone.
-4. Conviction scores size and gate orders (since 2026-08-25). See §3.4.
-   The first backtest found no relationship between score and outcome —
-   see `backtest_conviction.py`. The rule is unvalidated.
+4. Conviction scores cannot size, gate, or block an order. They did for
+   one day; the first backtest found no relationship between score and
+   outcome, so it was reverted. See `backtest_conviction.py` and §3.4.
 5. Manual buy paths (Needs Review, `spt_capture`) always preview before they
    commit, and the confirm step is the only thing that spends money.
 

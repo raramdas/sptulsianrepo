@@ -17,28 +17,38 @@ load_dotenv('/home/ubuntu/.env')
 SHEET_ID   = '1QdOHb2xWuBmF_OF1cReOXa9pQKhFFX2u266JgvFpK3M'
 SHEET_TAB  = 'Master Database'
 EXCHANGE   = 'NSE'
-INVEST_AMT = 5000   # legacy default; the buy path now sizes by conviction
+INVEST_AMT = 5000   # flat position size for every buy
 
 # ── Buy policy ───────────────────────────────────────────────────────────
-# Position size is set by the conviction score (see lib/conviction.py), which
-# is written by main_conviction.py at 10:15, before the 11:00 buy run.
+# CONVICTION-BASED SIZING AND GATING ARE OFF (reverted 2026-08-26).
 #
-# NOTE: this deliberately reverses the engine's original display-only status.
-# Conviction now gates and sizes real orders, so a scoring bug is a money bug.
-# The score has not been validated against realised outcomes.
+# They were switched on 2026-08-25 (>85 -> Rs 25,000, 75-85 -> Rs 10,000,
+# below 75 not bought). The first backtest, the next day, found no
+# detectable relationship between the score and subsequent excess return:
+# symbol-level Spearman -0.127 across 37 symbols (t=-0.76), and dropping the
+# two worst symbols left -0.081. By band, the 75-85 group that would have
+# received most of the capital did WORST (-3.91% mean excess) while the
+# sub-75 group we refused to buy did best (+1.01%).
 #
-# Read as: the first band whose floor the score EXCEEDS wins. A score of
-# exactly 85 falls in the 75-85 band; 85.1 is in the top band.
+# None of that is conclusive — two months, one regime, 12 realised closes —
+# but it is the absence of evidence for a rule that was spending real money,
+# so sizing is flat again at INVEST_AMT and the score is informational only.
+# Re-run `python3 backtest_conviction.py` as more trades close; flip this to
+# True to restore banded sizing once there is something to justify it.
+CONVICTION_SIZING_ENABLED = False
+
+# Retained so the rule is ready to re-enable, and so the dashboard can keep
+# colouring scores by the bands that would apply.
 CONVICTION_SIZING = [
     (85, 25000),   # score > 85        -> Rs 25,000
     (75, 10000),   # 75 <= score <= 85 -> Rs 10,000
 ]
-CONVICTION_MIN_SCORE = 75    # below this: do not buy at all
-REQUIRE_HAVE_INTEREST = True # skip unless SPTulsian discloses "Have Interest"
+CONVICTION_MIN_SCORE = 75    # below this: would not be bought, when enabled
 
-# A buy whose LIMIT order does not fill is re-attempted on later trading days,
-# so a call is not lost just because the price never came back that session.
-# Total attempts = 1 initial + BUY_RETRY_DAYS retries.
+# Independent of conviction, and still ON: this is SPTulsian's own
+# disclosure, not our model's opinion, and was never part of the backtest.
+REQUIRE_HAVE_INTEREST = True
+
 BUY_RETRY_DAYS = 2
 
 # Skips caused by OUR pipeline having no data — a scrape that found no live

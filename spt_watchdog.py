@@ -47,7 +47,8 @@ import argparse
 from email.message import EmailMessage
 from datetime import datetime, timezone, timedelta
 
-from lib.config import log, IST, GMAIL_USER, GMAIL_APP_PASSWORD
+from lib.config import (log, IST, GMAIL_USER, GMAIL_APP_PASSWORD,
+                        CONVICTION_SIZING_ENABLED)
 from lib.spt_scraper import read_watermark
 from lib.budget_manager import (unscored_pending_buys, pending_buys_missing_interest,
                                  close_oracle_connection)
@@ -109,14 +110,17 @@ def check_buy_inputs(now_ist=None):
         return []            # no recommendations expected at the weekend
 
     problems = []
-    unscored = unscored_pending_buys()
-    if unscored:
-        names = ', '.join(f"#{r['trade_id']} {r['stock_name']}" for r in unscored[:6])
-        problems.append(
-            f"{len(unscored)} trade(s) awaiting purchase have NO conviction score, so "
-            f"the buy run cannot size them: {names}"
-            f"{' ...' if len(unscored) > 6 else ''}. "
-            f"Re-run: python3 main_conviction.py")
+    # Only a blocker while conviction actually gates buying. With flat sizing
+    # a missing score costs visibility, not a trade, so it must not page.
+    if CONVICTION_SIZING_ENABLED:
+        unscored = unscored_pending_buys()
+        if unscored:
+            names = ', '.join(f"#{r['trade_id']} {r['stock_name']}" for r in unscored[:6])
+            problems.append(
+                f"{len(unscored)} trade(s) awaiting purchase have NO conviction score, so "
+                f"the buy run cannot size them: {names}"
+                f"{' ...' if len(unscored) > 6 else ''}. "
+                f"Re-run: python3 main_conviction.py")
 
     blank = pending_buys_missing_interest()
     if blank:
