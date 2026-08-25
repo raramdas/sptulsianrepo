@@ -127,26 +127,36 @@ def stock_type_status(category_name):
 
 
 def trades(status=None, category=None, symbol=None, date_from=None, date_to=None):
+    # Conviction comes from the most recent scoring row per trade. It is
+    # LEFT joined: a trade predating the engine, or one it could not score,
+    # must still appear — with a blank score rather than being dropped.
     sql = """
-        SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
-               status, order_type, my_buy_price, my_buy_qty, invested_amount,
-               target_price, gtt_id, gtt_status, my_sell_date, my_sell_price,
-               my_gain_loss, notes
-        FROM trades WHERE 1=1
+        SELECT t.trade_id, t.category_name, t.stock_name, t.symbol, t.stock_type,
+               t.buy_date, t.status, t.order_type, t.my_buy_price, t.my_buy_qty,
+               t.invested_amount, t.target_price, t.gtt_id, t.gtt_status,
+               t.my_sell_date, t.my_sell_price, t.my_gain_loss, t.notes,
+               c.score AS conviction, c.tier AS conviction_tier,
+               c.verdict AS conviction_verdict
+        FROM trades t
+        LEFT JOIN (SELECT trade_id, MAX(score_id) AS score_id
+                     FROM conviction_scores GROUP BY trade_id) latest
+               ON latest.trade_id = t.trade_id
+        LEFT JOIN conviction_scores c ON c.score_id = latest.score_id
+        WHERE 1=1
     """
     params = {}
     if status:
-        sql += " AND status = :status"; params['status'] = status
+        sql += " AND t.status = :status"; params['status'] = status
     if category:
-        sql += " AND category_name = :category"; params['category'] = category
+        sql += " AND t.category_name = :category"; params['category'] = category
     if symbol:
-        sql += " AND (UPPER(symbol) LIKE :symbol OR UPPER(stock_name) LIKE :symbol)"
+        sql += " AND (UPPER(t.symbol) LIKE :symbol OR UPPER(t.stock_name) LIKE :symbol)"
         params['symbol'] = f"%{symbol.upper()}%"
     if date_from:
-        sql += " AND buy_date >= :date_from"; params['date_from'] = date_from
+        sql += " AND t.buy_date >= :date_from"; params['date_from'] = date_from
     if date_to:
-        sql += " AND buy_date <= :date_to"; params['date_to'] = date_to
-    sql += " ORDER BY trade_id DESC"
+        sql += " AND t.buy_date <= :date_to"; params['date_to'] = date_to
+    sql += " ORDER BY t.trade_id DESC"
     return _df(sql, params)
 
 
@@ -158,9 +168,15 @@ def all_recommendations():
     of whether a buy actually happened — this was already being captured,
     just never surfaced as its own view."""
     return _df("""
-        SELECT trade_id, buy_date, stock_name, recommended_price, target_price, status, notes
-        FROM trades
-        ORDER BY buy_date DESC, trade_id DESC
+        SELECT t.trade_id, t.buy_date, t.stock_name, t.recommended_price,
+               t.target_price, t.status, t.notes, t.have_interest,
+               c.score AS conviction
+        FROM trades t
+        LEFT JOIN (SELECT trade_id, MAX(score_id) AS score_id
+                     FROM conviction_scores GROUP BY trade_id) latest
+               ON latest.trade_id = t.trade_id
+        LEFT JOIN conviction_scores c ON c.score_id = latest.score_id
+        ORDER BY t.buy_date DESC, t.trade_id DESC
     """)
 
 
@@ -696,6 +712,26 @@ if __name__ == '__main__':
     print("\nCategory status:")
     print(category_status().to_string())
     print("\nPerformance summary:", performance_summary())
+
+
+def conviction_by_symbol():
+    """symbol -> newest conviction score, for the holdings tables.
+
+    Holdings are per symbol while scores are per trade, and a symbol is often
+    held across several lots scored on different days. Takes the most recent
+    score for the symbol, which is the current read on that company.
+    """
+    df = _df("""
+        SELECT c.symbol, c.score
+        FROM conviction_scores c
+        JOIN (SELECT symbol, MAX(score_id) AS score_id
+                FROM conviction_scores WHERE symbol IS NOT NULL
+               GROUP BY symbol) latest
+          ON latest.score_id = c.score_id
+    """)
+    if df.empty:
+        return {}
+    return {str(r['symbol']).upper(): r['score'] for _, r in df.iterrows()}
 
 
 def conviction_latest():

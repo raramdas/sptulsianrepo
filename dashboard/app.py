@@ -194,12 +194,18 @@ def page_overview():
 
         tagged = kite_data.tag_holdings_with_category(open_trades_df)
         with st.expander(f"Holdings detail ({hs['count']})"):
-            display_cols = ['symbol', 'account_label', 'quantity', 'average_price', 'last_price', 'current_value', 'pnl']
+            conv_map = db.conviction_by_symbol()
+            display_cols = ['symbol', 'account_label', 'quantity', 'average_price', 'last_price',
+                            'current_value', 'pnl']
             money_cols = ['average_cost', 'last_price', 'current_value', 'pnl']
 
             def _render_holdings(df):
                 d = df[display_cols].rename(columns={'average_price': 'average_cost', 'account_label': 'account'}).copy()
                 d['quantity'] = d['quantity'].astype(int)
+                # Holdings are per symbol, conviction is per trade — map on
+                # symbol and show the most recent read on that company.
+                d['conviction'] = (d['symbol'].astype(str).str.upper().map(conv_map)
+                                   .apply(theme.conviction_badge))
                 st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
 
             if tagged.empty:
@@ -367,10 +373,14 @@ def page_drilldown():
         if cat_holdings.empty:
             st.info("No live holdings mapped to this category.")
         else:
-            display_cols = ['symbol', 'account_label', 'quantity', 'average_price', 'last_price', 'current_value', 'pnl']
+            conv_map = db.conviction_by_symbol()
+            display_cols = ['symbol', 'account_label', 'quantity', 'average_price', 'last_price',
+                            'current_value', 'pnl']
             money_cols = ['average_cost', 'last_price', 'current_value', 'pnl']
             d = cat_holdings[display_cols].rename(columns={'average_price': 'average_cost', 'account_label': 'account'}).copy()
             d['quantity'] = d['quantity'].astype(int)
+            d['conviction'] = (d['symbol'].astype(str).str.upper().map(conv_map)
+                               .apply(theme.conviction_badge))
             st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
         st.caption("From the last Kite sync — click 'Sync Kite Data' on Overview to refresh. For full trade "
                    "history in this category (including closed/error/skipped), use Trades Explorer.")
@@ -424,8 +434,13 @@ def _render_trades_table(tdf):
     tdf = tdf.copy()
     tdf['_status_raw'] = tdf['status']
     tdf['status'] = tdf.apply(lambda r: theme.friendly_status(r['_status_raw'], r.get('notes')), axis=1)
+    if 'conviction' in tdf.columns:
+        # Rendered as a badge banded to match the sizing thresholds, so the
+        # number that decided the position size is visible next to the trade.
+        tdf['conviction'] = tdf['conviction'].apply(theme.conviction_badge)
     money_cols = ['my_buy_price', 'invested_amount', 'target_price', 'my_sell_price', 'my_gain_loss']
-    display_cols = [c for c in tdf.columns if c not in ('trade_id', 'notes')]
+    hidden = ('trade_id', 'notes', 'conviction_tier', 'conviction_verdict')
+    display_cols = [c for c in tdf.columns if c not in hidden]
     st.markdown(theme.render_table(tdf[display_cols], money_cols=money_cols, status_col='status',
                                    status_class_col='_status_raw', gain_col='my_gain_loss'),
                 unsafe_allow_html=True)
@@ -482,9 +497,14 @@ def page_recommendations():
     })
     display['_status_raw'] = df['status']
     display['Status'] = df.apply(lambda r: theme.friendly_status(r['status'], r.get('notes')), axis=1)
+    # Both inputs the buy gate reads, next to the outcome — so a skip can be
+    # explained from the row itself rather than by opening the notes.
+    display['Conviction'] = df['conviction'].apply(theme.conviction_badge)
+    display['SPT Interest'] = df['have_interest'].fillna('').replace('', '—')
     st.caption(f"{len(display)} recommendation(s)")
     st.markdown(
-        theme.render_table(display[['Date', 'Stock', 'Purchase Price', 'Target Price', 'Status', '_status_raw']],
+        theme.render_table(display[['Date', 'Stock', 'Purchase Price', 'Target Price',
+                                    'Conviction', 'SPT Interest', 'Status', '_status_raw']],
                            money_cols=['Purchase Price', 'Target Price'], status_col='Status',
                            status_class_col='_status_raw'),
         unsafe_allow_html=True

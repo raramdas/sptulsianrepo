@@ -483,6 +483,21 @@ def friendly_status(status, notes):
     return status
 
 
+def conviction_badge(score):
+    """Score as a colour-coded chip. Blank when never scored — an unscored
+    trade is 'we do not know', which must not read as a low score."""
+    import pandas as _pd
+    if score is None or (isinstance(score, float) and score != score) or _pd.isna(score):
+        return '<span style="color:#9CA3AF;">—</span>'
+    v = float(score)
+    # Bands mirror lib/config.CONVICTION_SIZING, which decides position size.
+    colour = POSITIVE if v > 85 else (ACCENT if v >= 75 else NEGATIVE)
+    return (f'<span style="display:inline-block;min-width:2.4rem;text-align:center;'
+            f'padding:1px 7px;border-radius:999px;font-size:0.78rem;font-weight:600;'
+            f'color:{colour};background:{colour}1A;border:1px solid {colour}33;">'
+            f'{v:.0f}</span>')
+
+
 def render_table(df, money_cols=None, status_col=None, gain_col=None, status_class_col=None):
     """Return HTML for a styled table from a DataFrame. status_class_col
     (optional) lets the pill color be derived from a different, raw column
