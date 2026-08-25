@@ -129,8 +129,13 @@ def _as_of(df, when):
     return df[cols]
 
 
-def score_as_of(symbol, when, spt_target=None):
-    """Rebuild the reduced score for `symbol` as it would have read on `when`."""
+def score_as_of(symbol, when, spt_target=None, per_check=False):
+    """Rebuild the reduced score for `symbol` as it would have read on `when`.
+
+    With per_check=True, also returns each individual check's award as a
+    fraction of what it could have scored — so we can ask which checks carry
+    signal, rather than only whether the blended composite does.
+    """
     hist = history(symbol)
     if hist is None:
         return None
@@ -173,8 +178,16 @@ def score_as_of(symbol, when, spt_target=None):
         attempted += weight
     if not attempted:
         return None
-    return {'score': round(awarded / attempted * 100, 1),
-            'evidence': round(attempted, 1)}
+    out = {'score': round(awarded / attempted * 100, 1),
+           'evidence': round(attempted, 1)}
+    if per_check:
+        checks = {}
+        for name, cl in layers.items():
+            for c in cl:
+                if c['attempted']:
+                    checks[f"{name[:4]}:{c['name']}"] = c['awarded'] / c['attempted']
+        out['checks'] = checks
+    return out
 
 
 def price_on(symbol, when):
@@ -233,7 +246,7 @@ def build(log=print):
 
         ret = (exit_px - buy_px) / buy_px * 100
         bench = (bench_out - bench_in) / bench_in * 100
-        sc = score_as_of(sym, buy_dt, spt_target=t['target_price'])
+        sc = score_as_of(sym, buy_dt, spt_target=t['target_price'], per_check=True)
 
         rows.append({
             'trade_id': int(t['trade_id']), 'symbol': sym, 'stock': t['stock_name'],
@@ -245,6 +258,7 @@ def build(log=print):
             'return_pct': round(ret, 2),
             'bench_pct': round(bench, 2),
             'excess_pct': round(ret - bench, 2),
+            **{f'chk::{k}': v for k, v in ((sc or {}).get('checks') or {}).items()},
         })
         if (i + 1) % 25 == 0:
             log(f"  ...{i + 1}/{len(trades)}")
@@ -318,6 +332,27 @@ def report(df, log=print):
             s = '—' if pd.isna(r['score_asof']) else f"{r['score_asof']:.0f}"
             log(f"      {r['stock'][:24]:24s} score={s:>4s} excess={r['excess_pct']:+7.2f}% "
                 f"({r['days']}d)")
+
+    chk_cols = [c for c in df.columns if c.startswith('chk::')]
+    if chk_cols:
+        log("\n  Per-check signal, SYMBOL level (one row per symbol, "
+            "so repeated lots do not inflate n):")
+        log(f"    {'check':34s} {'n':>3s} {'rho':>7s}  {'coverage':>8s}")
+        sym = df.groupby('symbol').agg(
+            {**{c: 'mean' for c in chk_cols}, 'excess_pct': 'mean'})
+        stats = []
+        for c in chk_cols:
+            sub = sym[[c, 'excess_pct']].dropna()
+            if len(sub) < 10 or sub[c].nunique() < 3:
+                continue
+            rho = sub[c].rank().corr(sub['excess_pct'].rank())
+            stats.append((c.replace('chk::', ''), len(sub), rho,
+                          df[c].notna().mean() * 100))
+        for name, n, rho, cov in sorted(stats, key=lambda x: -abs(x[2])):
+            flag = '  <-- strongest' if abs(rho) == max(abs(s2[2]) for s2 in stats) else ''
+            log(f"    {name:34s} {n:>3d} {rho:>+7.3f}  {cov:>7.0f}%{flag}")
+        log("    (rho is rank correlation with excess return; at n<40 symbols "
+            "treat |rho|<0.3 as noise)")
 
     log("\n  CAVEAT: under two months, few realised closes, one market regime.")
     log("  Enough to catch gross mis-calibration; not enough to validate the score.")
