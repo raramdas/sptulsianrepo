@@ -163,15 +163,25 @@ def score_as_of(symbol, when, spt_target=None):
 
 
 def price_on(symbol, when):
-    """Close on or immediately before `when`."""
+    """Last real close on or before `when`, or None.
+
+    yfinance emits a trailing bar for the current session with a NaN close on
+    individual stocks (though not on the index). Returning that NaN silently
+    poisoned every open trade's return: `not float("nan")` is False, so the
+    caller's guard let it through and the row landed in the frame with a NaN
+    return. Drop NaNs before taking the last bar, and never return one.
+    """
     h = history(symbol)
     if h is None:
         return None
     cutoff = pd.Timestamp(when)
     if h.index.tz is not None:
         cutoff = cutoff.tz_localize(h.index.tz) if cutoff.tz is None else cutoff.tz_convert(h.index.tz)
-    past = h[h.index <= cutoff]
-    return float(past['Close'].iloc[-1]) if len(past) else None
+    past = h[h.index <= cutoff]['Close'].dropna()
+    if past.empty:
+        return None
+    val = float(past.iloc[-1])
+    return None if val != val or val <= 0 else val
 
 
 def build(log=print):
@@ -199,7 +209,7 @@ def build(log=print):
         exit_dt = (pd.Timestamp(t['my_sell_date']).tz_localize(None)
                    if closed and pd.notna(t['my_sell_date']) else pd.Timestamp.now().normalize())
         exit_px = float(t['my_sell_price']) if closed else price_on(sym, exit_dt)
-        if not exit_px:
+        if exit_px is None or exit_px != exit_px or exit_px <= 0:
             continue
 
         bench_in, bench_out = price_on(BENCHMARK, buy_dt), price_on(BENCHMARK, exit_dt)
@@ -239,6 +249,7 @@ def band_of(score):
 def report(df, log=print):
     if df.empty:
         log("No comparable trades."); return
+    df = df.dropna(subset=['excess_pct'])
     scored = df[df['score_asof'].notna()]
     log("")
     log("=" * 78)
@@ -269,7 +280,7 @@ def report(df, log=print):
              f'{CONVICTION_MIN_SCORE:.0f}-{CONVICTION_SIZING[0][0]:.0f} (Rs {CONVICTION_SIZING[1][1]:,})',
              f'<{CONVICTION_MIN_SCORE:.0f} (not bought)']
     for b in order:
-        g = scored[scored['band'] == b]
+        g = scored[scored['band'] == b].dropna(subset=['excess_pct'])
         if g.empty:
             log(f"    {b:24s} {0:>4d} {'—':>9s} {'—':>8s} {'—':>6s}")
             continue
