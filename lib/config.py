@@ -17,7 +17,29 @@ load_dotenv('/home/ubuntu/.env')
 SHEET_ID   = '1QdOHb2xWuBmF_OF1cReOXa9pQKhFFX2u266JgvFpK3M'
 SHEET_TAB  = 'Master Database'
 EXCHANGE   = 'NSE'
-INVEST_AMT = 5000
+INVEST_AMT = 5000   # legacy default; the buy path now sizes by conviction
+
+# ── Buy policy ───────────────────────────────────────────────────────────
+# Position size is set by the conviction score (see lib/conviction.py), which
+# is written by main_conviction.py at 10:15, before the 11:00 buy run.
+#
+# NOTE: this deliberately reverses the engine's original display-only status.
+# Conviction now gates and sizes real orders, so a scoring bug is a money bug.
+# The score has not been validated against realised outcomes.
+#
+# Read as: the first band whose floor the score EXCEEDS wins. A score of
+# exactly 85 falls in the 75-85 band; 85.1 is in the top band.
+CONVICTION_SIZING = [
+    (85, 25000),   # score > 85        -> Rs 25,000
+    (75, 10000),   # 75 <= score <= 85 -> Rs 10,000
+]
+CONVICTION_MIN_SCORE = 75    # below this: do not buy at all
+REQUIRE_HAVE_INTEREST = True # skip unless SPTulsian discloses "Have Interest"
+
+# A buy whose LIMIT order does not fill is re-attempted on later trading days,
+# so a call is not lost just because the price never came back that session.
+# Total attempts = 1 initial + BUY_RETRY_DAYS retries.
+BUY_RETRY_DAYS = 2
 DRY_RUN    = False
 GTT_DRY_RUN = False   # Independent DRY_RUN flag for the GTT/sell-side bot
 TEST_DATE  = None   # Set to None for live email date

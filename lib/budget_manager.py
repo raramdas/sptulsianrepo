@@ -233,24 +233,29 @@ def insert_trade_to_oracle(tip, category_id):
         log(f"  Oracle insert error: {e}")
 
 
-def get_pending_buy_trades(scan_dates):
-    """PENDING_BUY trades written by main_recommend.py's Phase 1 run, within
-    the scan date window — ready for main.py's Phase 2 to price, budget-
-    check, and buy."""
+def get_pending_buy_trades(scan_dates=None, retry_days=0):
+    """PENDING_BUY trades ready for main.py's Phase 2 to price, budget-check
+    and buy.
+
+    Covers today's fresh recommendations AND anything requeued by the retry
+    path, whose buy_date is the ORIGINAL recommendation date and so would fall
+    outside a today-only window. retry_days extends how far back a requeued
+    row stays eligible; buy_attempts caps how many times it is re-placed.
+    """
     conn = get_oracle_connection()
     if not conn:
         return []
     try:
         cursor = conn.cursor()
-        placeholders = ",".join(f":d{i}" for i in range(len(scan_dates)))
-        params = {f"d{i}": d for i, d in enumerate(scan_dates)}
-        cursor.execute(f"""
+        cursor.execute("""
             SELECT trade_id, category_name, stock_name, symbol, stock_type,
-                   recommended_price, target_price, timeframe, have_interest
+                   recommended_price, target_price, timeframe, have_interest,
+                   buy_date, NVL(buy_attempts, 0) AS buy_attempts
             FROM trades
             WHERE status = 'PENDING_BUY'
-              AND TO_CHAR(buy_date, 'YYYY-MM-DD') IN ({placeholders})
-        """, params)
+              AND buy_date >= TRUNC(SYSDATE) - :lookback
+            ORDER BY buy_date, trade_id
+        """, {'lookback': max(0, int(retry_days)) + 1})
         cols = [d[0].lower() for d in cursor.description]
         rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
         cursor.close()
@@ -440,6 +445,96 @@ def mark_trade_error_oracle(trade_id, message):
         cursor.close()
     except Exception as e:
         log(f"  mark_trade_error_oracle error: {e}")
+
+
+def get_latest_conviction(trade_id):
+    """Newest conviction row for a trade, or None if it was never scored.
+
+    Returns {'score': float|None, 'verdict': str, 'evidence_pct': float}.
+    score is None when the engine withheld a composite for lack of evidence —
+    caller must treat that as "unknown", never as zero.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return None
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT score, verdict, evidence_pct FROM conviction_scores
+            WHERE trade_id = :id ORDER BY score_id DESC FETCH FIRST 1 ROWS ONLY
+        """, {'id': trade_id})
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        return {'score': None if row[0] is None else float(row[0]),
+                'verdict': row[1], 'evidence_pct': row[2]}
+    except Exception as e:
+        log(f"  get_latest_conviction error: {e}")
+        return None
+
+
+def get_pending_fill_trades():
+    """Buys whose order was placed but not yet confirmed filled.
+
+    No date filter: the whole point is to look back at earlier days and see
+    whether yesterday's LIMIT ever filled.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT trade_id, category_name, stock_name, symbol, stock_type, buy_date,
+                   recommended_price, target_price, timeframe, have_interest,
+                   buy_order_id, my_buy_qty, NVL(buy_attempts, 0) AS buy_attempts
+            FROM trades
+            WHERE status = 'PENDING_FILL' AND buy_order_id IS NOT NULL
+            ORDER BY buy_date, trade_id
+        """)
+        cols = [d[0].lower() for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+    except Exception as e:
+        log(f"  get_pending_fill_trades error: {e}")
+        return []
+
+
+def requeue_for_retry(trade_id, attempts, note):
+    """Send an unfilled buy back to PENDING_BUY so the next run re-prices and
+    re-places it. Clears buy_order_id: the old DAY order has expired at the
+    exchange, and leaving it set would make the row look already-placed."""
+    conn = get_oracle_connection()
+    if not conn:
+        return
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE trades
+               SET status = 'PENDING_BUY', buy_order_id = NULL, buy_attempts = :n,
+                   notes = :note, updated_at = SYSTIMESTAMP
+             WHERE trade_id = :id
+        """, {'n': attempts, 'note': note, 'id': trade_id})
+        conn.commit()
+        cursor.close()
+    except Exception as e:
+        log(f"  requeue_for_retry error: {e}")
+
+
+def record_buy_attempt(trade_id, attempts):
+    conn = get_oracle_connection()
+    if not conn:
+        return
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE trades SET buy_attempts = :n, updated_at = SYSTIMESTAMP "
+                       "WHERE trade_id = :id", {'n': attempts, 'id': trade_id})
+        conn.commit()
+        cursor.close()
+    except Exception as e:
+        log(f"  record_buy_attempt error: {e}")
 
 
 def mark_gtt_failure_oracle(trade_id, message):

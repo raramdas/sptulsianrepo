@@ -423,7 +423,7 @@ These hold by construction and should be preserved by any future change:
    `NEEDS_REVIEW` and waits for a human.
 3. A trade is `Closed` only on a **confirmed** sell fill, never on a GTT status
    alone.
-4. Conviction scores cannot size, gate, or block an order.
+4. Conviction scores size and gate orders (since 2026-08-25). See §3.4.
 5. Manual buy paths (Needs Review, `spt_capture`) always preview before they
    commit, and the confirm step is the only thing that spends money.
 

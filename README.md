@@ -166,7 +166,10 @@ The invariants below hold by construction. Preserve them.
    `NEEDS_REVIEW` and waits for a human.
 3. A trade is `Closed` only on a **confirmed** sell fill, never on GTT status
    alone.
-4. Conviction scores cannot size, gate, or block an order.
+4. Conviction scores DO size and gate orders (since 2026-08-25): >85 buys
+   Rs 25k, 75-85 buys Rs 10k, below 75 or unscored is not bought. A
+   scoring bug is therefore a money bug. This reversed the engine's
+   original display-only status deliberately.
 5. Manual buy paths preview before they commit; the confirm step is the only
    thing that spends money.
 

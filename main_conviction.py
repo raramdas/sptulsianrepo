@@ -4,15 +4,23 @@ main_conviction.py — scores today's recommendations against public evidence
 and records the result. Runs between the 9:30 recommend job and the 11:00
 buy job, so the assessment is on the dashboard before any money moves.
 
-DISPLAY ONLY. This writes to conviction_scores and nothing else. It does not
-touch the trades table, does not size positions, and cannot stop a buy. The
-score is there to inform the human during the review window, and to build a
-track record that can be checked against outcomes before anyone considers
-wiring it into sizing.
+THIS SCORE NOW MOVES MONEY. It was display-only until 2026-08-25; the buy
+path (main.py) now reads it to decide both WHETHER to buy and HOW MUCH:
 
-By default it scores today's PENDING_BUY and NEEDS_REVIEW trades. Pass
---all-open to score every open position instead (useful for a one-off
-backfill).
+    score > 85        Rs 25,000
+    75 <= score <= 85 Rs 10,000
+    score < 75        not bought
+    no score at all   not bought
+
+So a scoring bug, a data-source outage, or a silently wrong metric is a
+money bug, not a cosmetic one. This job still only writes conviction_scores
+— it never touches trades — but main.py will refuse to buy anything this
+job failed to score. If it does not run, nothing is bought that day.
+
+By default it scores trades awaiting purchase (PENDING_BUY, NEEDS_REVIEW,
+PENDING_FILL) from the last few days, so retries are re-scored rather than
+sized on a stale number. Pass --all-open to score every open position
+instead (useful for a one-off backfill).
 
 Run directly:
     python3 main_conviction.py
@@ -47,11 +55,14 @@ def trades_to_score(all_open=False):
             WHERE status = 'Open' AND symbol IS NOT NULL
             ORDER BY trade_id DESC
         """)
+    # Includes trades requeued for a retry, whose buy_date is the ORIGINAL
+    # recommendation date — a today-only filter would miss them, and the buy
+    # run sizes on this score, so a stale one would size a real position.
     return db._df("""
         SELECT trade_id, symbol, stock_name, category_name, target_price
         FROM trades
-        WHERE status IN ('PENDING_BUY', 'NEEDS_REVIEW')
-          AND TRUNC(buy_date) = TRUNC(SYSDATE)
+        WHERE status IN ('PENDING_BUY', 'NEEDS_REVIEW', 'PENDING_FILL')
+          AND buy_date >= TRUNC(SYSDATE) - 4
         ORDER BY trade_id DESC
     """)
 
