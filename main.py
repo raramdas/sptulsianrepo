@@ -55,7 +55,7 @@ def decide_position_size(trade):
         return None, (f"Conviction withheld ({conv.get('verdict')}, evidence "
                       f"{conv.get('evidence_pct')}/100) — too little evidence to size")
     if score < CONVICTION_MIN_SCORE:
-        return None, (f'Conviction {score:.0f} is below the '
+        return None, (f'Conviction {score:.1f} is below the '
                       f'{CONVICTION_MIN_SCORE}-point floor')
 
     for floor, amount in CONVICTION_SIZING:

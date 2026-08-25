@@ -307,6 +307,8 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 .status-pill-error         {{ color: {NEGATIVE}; background-color: #FEE2E2; }}
 .status-pill-skipped       {{ color: {WARNING};  background-color: #FEF3C7; }}
 .status-pill-needs_review  {{ color: {ACCENT};   background-color: {ACCENT_DIM}; }}
+.status-pill-pending_fill  {{ color: {ACCENT};   background-color: {ACCENT_DIM}; }}
+.status-pill-pending_buy  {{ color: {ACCENT};   background-color: {ACCENT_DIM}; }}
 
 /* Login form */
 div[data-testid="stForm"] {{
@@ -471,6 +473,13 @@ def friendly_status(status, notes):
         return f'Skipped — {n}' if n else 'Skipped'
     if s == 'NEEDS_REVIEW':
         return 'Needs Review'
+    if s == 'PENDING_BUY':
+        return 'Awaiting buy'
+    if s == 'PENDING_FILL':
+        # Order is live at the broker but has not filled — usually a LIMIT at
+        # the recommended price while the market sits above it. Distinct from
+        # Open: nothing has been bought and no capital is committed yet.
+        return f'Order placed — awaiting fill ({n})' if n else 'Order placed — awaiting fill'
     return status
 
 
