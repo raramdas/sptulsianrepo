@@ -27,11 +27,26 @@ METHOD, and its limits — read these before trusting any number below.
   Benchmark.  Raw return over a rising market says little, so every return is
   reported net of NIFTY 50 over the identical holding window.
 
-  Sample.  Around 120 trades across ~39 symbols over under two months, with
-  few realised closes. That is enough to expose gross mis-calibration — a
-  band that loses money, or a score inverted against outcomes. It is NOT
-  enough to establish that the score works. Do not read a small positive
-  correlation here as validation.
+  Sample, and why the trade count flatters it.  ~113 trades but only ~37
+  symbols: 26 of them are held in several lots bought days apart, whose
+  returns are near-identical. Counting those as independent observations
+  roughly triples the apparent sample and makes a weak correlation look
+  significant. The symbol-level figure is the honest one, and it is what
+  should be quoted.
+
+  FIRST RESULT (2026-08-26). No detectable relationship between score and
+  subsequent excess return:
+      trade level    n=113  rho=-0.235  t=-2.55   <- overstated by clustering
+      symbol level   n= 37  rho=-0.127  t=-0.76   <- not distinguishable from 0
+  Dropping the two worst symbols moves it to -0.081, so the weak negative is
+  not robust either. By sizing band, symbol level: >85 mean -0.37%, 75-85
+  mean -3.91%, <75 mean +1.01% — the band that would receive most of the
+  capital did worst, and the band we refuse to buy did best. With 7-8
+  symbols per band none of that is conclusive; the conclusion is the absence
+  of evidence, not evidence of inversion.
+
+  So: this does NOT support sizing on the score. It is also under two months
+  of one regime, with 12 realised closes and the rest marked to market.
 
 Run:
     python3 backtest_conviction.py
