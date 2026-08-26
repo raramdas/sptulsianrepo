@@ -37,6 +37,27 @@ Type
 import streamlit as st
 import pandas as pd
 
+# Sizing thresholds come from lib/bands.py so the badge cannot disagree with
+# the buy path. bands.py deliberately has no import-time environment
+# dependency, but the dashboard is deployed to its own directory, so guard the
+# path rather than assuming the repo root is importable. If it genuinely is
+# not there, fall back to tier banding and say so in the tooltip — a wrong
+# colour is worse than a muted one.
+import os as _os
+import sys as _sys
+_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _ROOT not in _sys.path:
+    _sys.path.insert(0, _ROOT)
+try:
+    from lib.bands import (CONVICTION_SIZING_ENABLED as _BANDS_ENABLED,
+                           CONVICTION_SIZING as _BANDS,
+                           CONVICTION_MIN_SCORE as _BANDS_MIN,
+                           DISPLAY_TIERS as _BANDS_TIERS,
+                           size_for as _band_size)
+except ImportError:  # pragma: no cover - deployment safety net
+    _BANDS_ENABLED, _BANDS, _BANDS_MIN = False, [], 0
+    _BANDS_TIERS, _band_size = (80, 65, 50), lambda s: None
+
 BG        = "#FAFAFA"
 CARD      = "#FFFFFF"
 SURFACE   = "#F8FAFC"
@@ -484,24 +505,49 @@ def friendly_status(status, notes):
 
 
 def conviction_badge(score):
-    """Score as a colour-coded chip. Blank when never scored — an unscored
-    trade is 'we do not know', which must not read as a low score."""
+    """Score as a colour-coded chip, coloured by what the score actually DOES.
+
+    Blank when never scored — an unscored trade is 'we do not know', which
+    must not read as a low score.
+
+    The colour is derived from lib/bands.py rather than hardcoded here. Twice
+    now these thresholds have been written down in two places and drifted
+    apart, and both times the badge kept rendering a correct number under a
+    colour that made a false claim about the money: red on a name the engine
+    accepted, then amber spanning the boundary between funded and not funded.
+    Deriving it removes the possibility rather than fixing the instance.
+
+    When sizing is on, each colour means one position size. When it is off,
+    the score decides nothing, so it falls back to the engine's own tiers.
+    """
     import pandas as _pd
     if score is None or (isinstance(score, float) and score != score) or _pd.isna(score):
         return '<span style="color:#9CA3AF;">—</span>'
     v = float(score)
-    # Bands mirror the ENGINE's tiers (T1/T2/T3/T4 at 80/65/50), not the
-    # sizing buckets. They used to mirror CONVICTION_SIZING, which was correct
-    # while the score set position size — but that was disabled, and the
-    # thresholds then said something different from what they appeared to.
-    # A 62.7 the engine ACCEPTs as T3 was rendering in the same red as a 6.7
-    # it rejects, which reads as a failure the engine never declared.
-    colour = (POSITIVE if v >= 80 else
-              ACCENT   if v >= 65 else
-              WARNING  if v >= 50 else
-              NEGATIVE)
-    return (f'<span style="display:inline-block;min-width:2.4rem;text-align:center;'
-            f'padding:1px 7px;border-radius:999px;font-size:0.78rem;font-weight:600;'
+
+    # The chip shows a rounded score for width, but the tooltip must not: at
+    # one decimal, 62.9 reads "below the 63 floor"; rounded, it reads
+    # "63 — below the 63 floor", which contradicts itself precisely at the
+    # boundary where someone would go looking for an explanation.
+    if _BANDS_ENABLED:
+        amount = _band_size(v)
+        if amount is None:
+            colour, tip = NEGATIVE, f'{v:.1f} — below the {_BANDS_MIN} floor, not bought'
+        else:
+            top = _BANDS[0][1]
+            colour = POSITIVE if amount == top else ACCENT
+            tip = f'{v:.1f} — sizes at Rs {amount:,}'
+    else:
+        hi, mid, lo = _BANDS_TIERS
+        colour = (POSITIVE if v >= hi else
+                  ACCENT   if v >= mid else
+                  WARNING  if v >= lo else
+                  NEGATIVE)
+        tip = f'{v:.1f} — display only, sizing disabled'
+
+    return (f'<span title="{tip}" style="display:inline-block;min-width:2.4rem;'
+            f'text-align:center;padding:1px 7px;border-radius:999px;'
+            f'font-size:0.78rem;font-weight:600;'
             f'color:{colour};background:{colour}1A;border:1px solid {colour}33;">'
             f'{v:.0f}</span>')
 

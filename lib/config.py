@@ -54,16 +54,20 @@ INVEST_AMT = 5000   # flat position size for every buy
 #
 # The underlying caution has NOT been retired. There is still no evidence that
 # any conviction score predicts returns, and the lite engine has zero closed
-# trades behind it. Set this False to go back to flat INVEST_AMT.
-CONVICTION_SIZING_ENABLED = True
-
-CONVICTION_SIZING = [
-    (85, 25000),   # score > 85        -> Rs 25,000
-    (63, 10000),   # 63 <= score <= 85 -> Rs 10,000
-]
-# Equals the lower band, and sits above lib/conviction_lite.ACCEPT_FLOOR (50)
-# so sizing never funds a name the engine's own verdict rejects.
-CONVICTION_MIN_SCORE = 63
+# trades behind it. Set CONVICTION_SIZING_ENABLED False to go back to flat
+# INVEST_AMT.
+#
+# The numbers themselves live in lib/bands.py, which has no import-time
+# dependency on the environment, so the dashboard can read the same thresholds
+# without needing broker credentials. Edit them THERE, not here — the badge
+# on the dashboard derives its colours from the same values, and that is what
+# stops the UI drifting out of step with the policy it displays.
+from lib.bands import (  # noqa: E402,F401  (re-exported for existing imports)
+    CONVICTION_SIZING_ENABLED,
+    CONVICTION_SIZING,
+    CONVICTION_MIN_SCORE,
+    size_for,
+)
 
 # Independent of conviction, and still ON: this is SPTulsian's own
 # disclosure, not our model's opinion, and was never part of the backtest.
