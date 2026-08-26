@@ -17,7 +17,7 @@ and IST is UTC+5:30.
 | Job | UTC | IST | What it does |
 |---|---|---|---|
 | `main_recommend.py` | `0 4` | 09:30 | Parse the advisory email, resolve symbols, scrape targets. **No orders.** |
-| `main_conviction.py` | `45 4` | 10:15 | Score new recommendations on public evidence. Display only. |
+| `main_conviction.py` | `45 4` | 10:15 | Score new recommendations (lite engine). Display only. |
 | `spt_watchdog.py` | `15 5` | 10:45 | Alarm if the scraper has gone dark |
 | `main.py` | `30 5` | 11:00 | Price, size against budget, place real buy orders |
 | `main_gtt_oracle.py` | `30 10` | 16:00 | Place GTT sells; close trades on confirmed fills |
@@ -30,6 +30,8 @@ guess.
 Run on demand:
 
 ```bash
+python3 main_conviction.py --dry-run    # score today's, print, write nothing
+python3 main_conviction.py --engine full SYMBOL   # deep dive on one name
 python3 main_conviction.py --all-open   # re-score every open position
 python3 spt_capture.py --dry-run        # preview scraped targets, then save
 python3 spt_watchdog.py --check-only    # health check, never sends mail
@@ -57,7 +59,8 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 │   ├── email_reader.py    #   Gmail IMAP -> tips
 │   ├── budget_manager.py  #   budget policy; all TRADES reads/writes
 │   ├── spt_scraper.py     #   portal login + two parsing strategies
-│   ├── conviction.py      #   four-layer scoring engine
+│   ├── conviction.py      #   four-layer fundamentals engine (--engine full)
+│   ├── conviction_lite.py #   momentum/trend/upside/liquidity (default)
 │   └── sheet_logger.py    #   Google Sheets mirror (legacy)
 │
 ├── dashboard/             # Streamlit UI ("Capital Ledger")
@@ -67,6 +70,7 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 │   ├── capture_api.py     #   authenticated endpoint for spt_capture.py
 │   └── theme.py           #   CSS design system
 │
+├── migrations/            # numbered, idempotent Oracle DDL
 ├── archive/               # superseded / one-off — see archive/README.md
 ├── bot/                   # multi-tenant variant — NOT scheduled
 ├── provisioning/          # tenant onboarding for the bot/ tree
@@ -184,8 +188,29 @@ statement in the conviction engine.
 
 ## Note on the conviction layer
 
+Two engines. `--engine lite` is the default and scores every new
+recommendation on four cheap, always-available inputs — 12-1 momentum (35),
+trend alignment (25), upside to the advisory target (25), liquidity (15).
+One network call per symbol. `--engine full` is the original four-layer
+fundamentals engine, kept for a deep look at a single name.
+
+Their scores are **not comparable** and are stored with a `model` column so
+the track record can separate them. Never pool them in a backtest.
+
+The lite engine's shape came out of decomposing the full engine's checks
+against realised excess return. Two results drove it: trend alignment
+correlated positively (rho +0.23) while the overbought and 52-week guards
+correlated *negatively* (-0.35, -0.22) — the engine was rewarding and
+penalising the same underlying property at once. So in the lite engine those
+guards are **flags, not points**: "don't chase an extended move" is a risk
+observation, and encoding it as negative score marked down exactly the names
+that outperformed in that window.
+
+That decomposition rests on 37 symbols over two months in one market regime.
+It is a hypothesis about what to measure, not evidence that the new weights
+work. Both engines are display-only for that reason, and the dashboard shows
+every score alongside the checks that produced it.
+
 It computes published metrics from public data and shows its working. It is
 decision support, not financial advice, and not a prediction — every threshold
-in it is a convention tuned against one portfolio. That is why it is
-display-only, and why the dashboard shows each score alongside the checks that
-produced it.
+in it is a convention tuned against one portfolio.

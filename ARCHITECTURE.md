@@ -320,7 +320,55 @@ both trades already known to be mistakes — `ICDSLTD` (illiquid, ₹0.00 crore/
 and `NIFTY INFRA` (an index, insufficient evidence) — without being told about
 either.
 
-### 3.5 Component reference
+### 3.5 The lite engine — what new recommendations actually get
+
+`lib/conviction_lite.py` is the default (`main_conviction.py --engine lite`).
+Four components, one network call per symbol, no missing-filing holes:
+
+| Component | Points | Why it is here |
+|---|---|---|
+| Momentum 12-1 | 35 | Most robustly documented equity factor globally and in India; the direction the per-check attribution pointed at |
+| Trend alignment | 25 | The one technical check that correlated positively (rho +0.23) |
+| Upside to advisory target | 25 | Already in the ledger, free, and it is the advisory's own stated edge |
+| Liquidity | 15 | Not alpha — the constraint that decides whether a position can be exited at all |
+
+**Its shape came from decomposing the full engine.** Correlating each
+individual check against realised excess return at symbol level exposed a
+contradiction inside the technical layer:
+
+| Check | rho vs excess return |
+|---|---|
+| Overbought guard (RSI) | −0.348 |
+| Trend alignment | +0.228 |
+| 52-week exhaustion guard | −0.220 |
+| Volume confirmation | +0.138 |
+| Piotroski F-Score | −0.072 |
+| Liquidity | +0.029 |
+| Altman Z''-EM | −0.017 |
+
+Trend alignment rewarded strength; the two guards penalised the same
+underlying property. They partly cancelled, which is a large part of why the
+composite landed near zero.
+
+**So the guards became flags, not points.** "Don't chase an extended move" is
+a risk observation about *entry timing*. Encoding it as negative score marked
+down exactly the names that outperformed in that window. RSI, proximity to
+the 52-week high, realised volatility and "price already above target" are all
+surfaced on the dashboard and move no number. Liquidity is the sole hard gate,
+because an exit that cannot happen is a different risk in kind.
+
+**Missing data still renormalises.** A recommendation with no scraped target
+yet drops the upside component and scores out of the remaining 75, reported as
+`evidence_pct = 75`. A missing target must not read as "no upside".
+
+**This is a hypothesis, not a finding.** The attribution rests on 37 symbols
+over two months in one market regime, and at that size no single check clears
+a sensible noise threshold — the strongest is one of seven tests. The lite
+engine is therefore display-only on exactly the same terms as the full one.
+Scores from the two engines are stored with a `model` column and must never be
+pooled in a backtest.
+
+### 3.6 Component reference
 
 | Module | Role |
 |---|---|
@@ -336,7 +384,8 @@ either.
 | `lib/order_status.py` | Order status lookup and sell-order reconciliation |
 | `lib/budget_manager.py` | Budget policy, all `TRADES` reads/writes |
 | `lib/spt_scraper.py` | Portal login, both parsing strategies, liveness watermark |
-| `lib/conviction.py` | Evidence gathering and the four scoring layers |
+| `lib/conviction.py` | Four-layer fundamentals engine (`--engine full`) |
+| `lib/conviction_lite.py` | Momentum/trend/upside/liquidity engine (default) |
 | `lib/sheet_logger.py` | Google Sheets mirror (legacy, still written) |
 | `dashboard/app.py` | Streamlit UI, all pages |
 | `dashboard/db.py` | Dashboard's Oracle data access |
@@ -377,7 +426,7 @@ The VM clock is **UTC**; IST is UTC+5:30.
 | Job | Cron (UTC) | IST | Purpose |
 |---|---|---|---|
 | `main_recommend.py` | `0 4 * * 1-5` | 09:30 | Phase 1 |
-| `main_conviction.py` | `45 4 * * 1-5` | 10:15 | Scoring (display only) |
+| `main_conviction.py` | `45 4 * * 1-5` | 10:15 | Scoring, lite engine (display only) |
 | `spt_watchdog.py` | `15 5 * * 1-5` | 10:45 | Liveness alarm |
 | `main.py` | `30 5 * * 1-5` | 11:00 | Phase 2 |
 | `main_gtt_oracle.py` | `30 10 * * 1-5` | 16:00 | Phase 3 |

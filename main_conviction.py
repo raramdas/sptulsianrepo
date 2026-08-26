@@ -4,12 +4,25 @@ main_conviction.py — scores today's recommendations against public evidence
 and records the result. Runs between the 9:30 recommend job and the 11:00
 buy job, so the assessment is on the dashboard before any money moves.
 
+Two engines, selected with --engine:
+
+    lite (default)  lib/conviction_lite.py — momentum, trend, upside to the
+                    advisory target, liquidity. One network call per symbol,
+                    under a second, no missing-filing holes. This is what new
+                    recommendations get.
+    full            lib/conviction.py — the four-layer fundamentals engine.
+                    Slower and gappier; kept for depth on a specific name.
+
+Scores from the two are NOT comparable and are stored with a `model` column
+so the track record can tell them apart. Do not pool them in a backtest.
+
 DISPLAY ONLY, again. This score briefly sized and gated real orders
 (2026-08-25 to 2026-08-26). The first backtest found no relationship between
-it and subsequent excess return — symbol-level Spearman -0.127 over 37
-symbols — so sizing reverted to a flat amount and the score is
-informational: shown on the dashboard, recorded for the track record, and
-not consulted by the buy path.
+the full engine's composite and subsequent excess return — symbol-level
+Spearman -0.127 over 37 symbols — so sizing reverted to a flat amount and the
+score is informational: shown on the dashboard, recorded for the track
+record, and not consulted by the buy path. The lite engine is a fresh
+hypothesis and is equally unvalidated; it starts display-only too.
 
 It writes conviction_scores and nothing else. If this job fails, buying is
 unaffected; only visibility is lost. See lib/config.CONVICTION_SIZING_ENABLED
@@ -31,7 +44,7 @@ import argparse
 from datetime import datetime
 
 from lib.config import log, IST
-from lib import conviction
+from lib import conviction, conviction_lite
 
 # The dashboard package owns the Oracle access layer. On the VM it is deployed
 # to its own directory; in a checkout it sits alongside this file. Try the
@@ -65,16 +78,26 @@ def trades_to_score(all_open=False):
     """)
 
 
-def save_score(conn, trade, result):
+def has_model_column(conn):
+    """The `model` column distinguishes lite from full scores. It is added by
+    a migration; if this runs against a database that has not had it applied
+    yet, fall back rather than failing the whole job."""
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO conviction_scores
-            (trade_id, symbol, stock_name, category_name, score, evidence_pct,
-             tier, verdict, sector, reasons, warnings, layers_json)
-        VALUES
-            (:trade_id, :symbol, :stock_name, :category_name, :score, :evidence_pct,
-             :tier, :verdict, :sector, :reasons, :warnings, :layers_json)
-    """, {
+    cur.execute("""SELECT COUNT(*) FROM user_tab_columns
+                   WHERE table_name = 'CONVICTION_SCORES' AND column_name = 'MODEL'""")
+    return cur.fetchone()[0] > 0
+
+
+def save_score(conn, trade, result, with_model=True):
+    cur = conn.cursor()
+    cols = ("trade_id, symbol, stock_name, category_name, score, evidence_pct, "
+            "tier, verdict, sector, reasons, warnings, layers_json")
+    vals = (":trade_id, :symbol, :stock_name, :category_name, :score, :evidence_pct, "
+            ":tier, :verdict, :sector, :reasons, :warnings, :layers_json")
+    if with_model:
+        cols += ", model"
+        vals += ", :model"
+    cur.execute(f"INSERT INTO conviction_scores ({cols}) VALUES ({vals})", {
         'trade_id': int(trade['trade_id']),
         'symbol': trade['symbol'],
         'stock_name': trade['stock_name'],
@@ -89,18 +112,28 @@ def save_score(conn, trade, result):
         # Store the full working, so the dashboard can show why a score is
         # what it is rather than asking the reader to trust a number.
         'layers_json': json.dumps(result['layers'], default=str),
+        **({'model': result.get('model', 'full')} if with_model else {}),
     })
 
 
-def run(all_open=False):
-    log("=== Conviction scoring starting (display only — no orders affected) ===")
+ENGINES = {'lite': conviction_lite, 'full': conviction}
+
+
+def run(all_open=False, engine='lite', dry_run=False):
+    mod = ENGINES[engine]
+    log(f"=== Conviction scoring starting — engine={engine} "
+        f"(display only — no orders affected) ===")
     df = trades_to_score(all_open=all_open)
     if df.empty:
         log("Nothing to score.")
         return
 
     log(f"Scoring {len(df)} trade(s)...")
-    conn = db.get_connection()
+    conn = None if dry_run else db.get_connection()
+    with_model = has_model_column(conn) if conn is not None else False
+    if conn is not None and not with_model:
+        log("  NOTE: conviction_scores has no `model` column — storing without it. "
+            "Apply the migration so lite and full scores stay distinguishable.")
     scored = failed = 0
     try:
         for _, t in df.iterrows():
@@ -112,8 +145,9 @@ def run(all_open=False):
             except (TypeError, ValueError):
                 target = None
             try:
-                result = conviction.score_symbol(sym, spt_target=target, log=log)
-                save_score(conn, t, result)
+                result = mod.score_symbol(sym, spt_target=target, log=log)
+                if conn is not None:
+                    save_score(conn, t, result, with_model=with_model)
                 scored += 1
                 score_s = 'n/a' if result['score'] is None else f"{result['score']:.0f}"
                 log(f"  #{int(t['trade_id'])} {sym:14s} score={score_s:>4s} "
@@ -121,20 +155,29 @@ def run(all_open=False):
                     f"-> {result['verdict']}")
                 for r in result['reasons']:
                     log(f"       ! {r}")
+                for w in result.get('warnings', []):
+                    log(f"       ~ {w}")
             except Exception as e:
                 # One bad symbol must not lose the rest of the run.
                 failed += 1
                 log(f"  #{int(t['trade_id'])} {sym}: scoring FAILED — {type(e).__name__}: {e}")
-        conn.commit()
+        if conn is not None:
+            conn.commit()
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
-    log(f"=== Conviction scoring complete: {scored} scored, {failed} failed ===")
+    tail = " (dry run — nothing written)" if dry_run else ""
+    log(f"=== Conviction scoring complete: {scored} scored, {failed} failed{tail} ===")
 
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--all-open', action='store_true',
                     help="Score every open position, not just today's recommendations")
+    ap.add_argument('--engine', choices=sorted(ENGINES), default='lite',
+                    help="Scoring engine (default: lite)")
+    ap.add_argument('--dry-run', action='store_true',
+                    help="Score and print, but write nothing")
     args = ap.parse_args()
-    run(all_open=args.all_open)
+    run(all_open=args.all_open, engine=args.engine, dry_run=args.dry_run)
