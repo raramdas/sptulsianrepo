@@ -490,8 +490,16 @@ def conviction_badge(score):
     if score is None or (isinstance(score, float) and score != score) or _pd.isna(score):
         return '<span style="color:#9CA3AF;">—</span>'
     v = float(score)
-    # Bands mirror lib/config.CONVICTION_SIZING, which decides position size.
-    colour = POSITIVE if v > 85 else (ACCENT if v >= 75 else NEGATIVE)
+    # Bands mirror the ENGINE's tiers (T1/T2/T3/T4 at 80/65/50), not the
+    # sizing buckets. They used to mirror CONVICTION_SIZING, which was correct
+    # while the score set position size — but that was disabled, and the
+    # thresholds then said something different from what they appeared to.
+    # A 62.7 the engine ACCEPTs as T3 was rendering in the same red as a 6.7
+    # it rejects, which reads as a failure the engine never declared.
+    colour = (POSITIVE if v >= 80 else
+              ACCENT   if v >= 65 else
+              WARNING  if v >= 50 else
+              NEGATIVE)
     return (f'<span style="display:inline-block;min-width:2.4rem;text-align:center;'
             f'padding:1px 7px;border-radius:999px;font-size:0.78rem;font-weight:600;'
             f'color:{colour};background:{colour}1A;border:1px solid {colour}33;">'
