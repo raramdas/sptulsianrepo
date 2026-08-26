@@ -46,9 +46,11 @@ def decide_position_size(trade):
          conservative reading, but note that a scraper outage therefore stops
          buying for the day; spt_watchdog.py is what surfaces that.
 
-      2. Conviction decides the size, and anything under the floor is not
-         bought. A missing score is "unknown", never zero — it is skipped and
-         flagged rather than silently sized at the bottom band.
+      2. Conviction sizing, ONLY when CONVICTION_SIZING_ENABLED is set. It is
+         currently off, so this gate does not run and the score cannot skip a
+         trade. When on: the score sets the band, anything under the floor is
+         not bought, and a missing score is "unknown" rather than zero — it is
+         skipped and flagged rather than silently sized at the bottom band.
     """
     if REQUIRE_HAVE_INTEREST:
         hi = (trade.get('have_interest') or '').strip()
@@ -117,7 +119,11 @@ def attempt_buy(trade, enctoken):
         update_trade_after_buy_attempt(trade_id, 'SKIPPED', symbol=symbol,
                                        stock_type=cap_type, notes=skip_reason)
         return
-    log(f"  Position size Rs.{invest_amt:,} (by conviction)")
+    # Name the actual source. Saying "by conviction" while CONVICTION_SIZING_ENABLED
+    # is False puts a claim in the audit trail that invariant #4 forbids, and
+    # anyone reconstructing why a position was sized this way would believe it.
+    sizing_src = "by conviction" if CONVICTION_SIZING_ENABLED else "flat"
+    log(f"  Position size Rs.{invest_amt:,} ({sizing_src})")
 
     mkt_price = get_market_price(stock, enctoken, kite_symbol=symbol)
     log(f"{stock} email:{email_price} market:{mkt_price}")
