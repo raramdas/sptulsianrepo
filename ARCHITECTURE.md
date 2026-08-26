@@ -399,7 +399,7 @@ Entrypoints sit at the repository root because cron invokes them by bare
 filename; everything they share lives in `lib/`. `bot/` deliberately does not
 import from `lib/` — it is a self-contained multi-tenant tree.
 
-### 3.6 Data model
+### 3.7 Data model
 
 Oracle Autonomous Database, wallet authentication.
 
@@ -419,7 +419,7 @@ Oracle Autonomous Database, wallet authentication.
 regardless of outcome, which is what makes the Recommendations page a complete
 record rather than a survivor-biased one.
 
-### 3.7 Schedule
+### 3.8 Schedule
 
 The VM clock is **UTC**; IST is UTC+5:30.
 
@@ -469,6 +469,8 @@ indistinguishable from an outage and would cry wolf every time.
 | HTTP 500 from a section endpoint | Wrong controller for that section | Endpoint is read per page — confirm the page still declares it |
 | Pages fetch, zero rows | Portal markup changed | `python3 spt_capture.py --dry-run` |
 | Login "succeeds", no data | Credentials changed | Substance check should catch it; verify `SPT_USERNAME`/`SPT_PASSWORD` |
+| TCP connects but **nothing responds** on :22 and :443 | Global OOM — userspace wedged, kernel still answering | OCI console → force reboot, then `journalctl -b -1 \| grep -i oom` |
+| `warp-svc` restarting repeatedly | Memory leak hitting its cgroup cap | `systemctl show warp-svc -p MemoryCurrent`; this is the cap working |
 
 ### 4.3 Safety invariants
 
@@ -484,6 +486,37 @@ These hold by construction and should be preserved by any future change:
    outcome, so it was reverted. See `backtest_conviction.py` and §3.4.
 5. Manual buy paths (Needs Review, `spt_capture`) always preview before they
    commit, and the confirm step is the only thing that spends money.
+
+### 4.4 Resource containment
+
+The VM has **956 MB of RAM**. That is the binding constraint on everything
+here, and it is why the box went down on 2026-08-26.
+
+`warp-svc` leaks. The kernel OOM-killed it on 18, 20, 22 and 24 August —
+roughly every two days, at ~250 MB resident each time — and on the 26th it
+grew fast enough to wedge the machine before the OOM killer resolved it.
+
+The failure mode is worth understanding, because the symptom is misleading.
+With no cgroup limit, `warp-svc`'s growth triggers a **global** OOM, and the
+kernel then picks victims anywhere in the system. It took out `sshd` and
+Caddy. From outside, both ports still completed a TCP handshake — the kernel
+was healthy — but no daemon ever replied. Two unrelated services accepting
+connections and answering nothing is the signature of userspace starvation,
+not of a network or application fault. The disk, the obvious first suspect,
+was at 22%.
+
+Three changes contain it:
+
+| Change | Why |
+|---|---|
+| `MemoryMax=300M`, `MemoryHigh=220M`, `Restart=always` on `warp-svc` | Converts a global OOM into a local one. systemd kills only that unit and restarts it in 5s; the kernel never gets to choose `sshd`. Steady state is ~80 MB. |
+| 2 GB swapfile, `vm.swappiness=10` | There was none. Swap is an emergency cushion here, not a working tier — hence the low swappiness. |
+| `SystemMaxUse=200M` on journald | `warp-svc` dumps full metrics structures line by line when it degrades; journals had reached 632 MB, uncapped. |
+
+The proxy is needed for about a minute a day, so a restart is invisible to the
+workload. If `warp-svc` ever begins restarting frequently, that is the cap
+doing its job — the leak is upstream in Cloudflare's daemon, not in this
+system.
 
 ---
 
@@ -509,8 +542,12 @@ ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
   curl -s ifconfig.me; echo                                    # must be 140.245.226.35
   curl -s --socks5-hostname 127.0.0.1:40000 ifconfig.me; echo  # must be Cloudflare
   sudo systemctl is-active warp-svc stockbot-dashboard stockbot-capture-api
+  free -m                                                      # swap must be non-zero
+  systemctl show warp-svc -p MemoryCurrent                     # ~80MB; cap is 300MB
   cd /home/ubuntu/stock_bot_v4 && python3 spt_watchdog.py --check-only'
 ```
+
+On a 956 MB VM the memory line is not incidental — see §4.4.
 
 ### 5.3 Testing convention
 

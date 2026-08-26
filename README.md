@@ -107,8 +107,19 @@ ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
   curl -s ifconfig.me; echo                                    # MUST be 140.245.226.35
   curl -s --socks5-hostname 127.0.0.1:40000 ifconfig.me; echo  # MUST be Cloudflare
   sudo systemctl is-active warp-svc stockbot-dashboard stockbot-capture-api
+  free -m                                                      # swap MUST be non-zero
+  systemctl show warp-svc -p MemoryCurrent                     # ~80MB; capped at 300MB
   cd /home/ubuntu/stock_bot_v4 && python3 spt_watchdog.py --check-only'
 ```
+
+**The VM has 956 MB of RAM and that is the binding constraint.** `warp-svc`
+leaks and took the box down on 2026-08-26 by triggering a global OOM that
+killed `sshd` and Caddy — from outside, ports 22 and 443 still completed a TCP
+handshake but nothing ever replied. It is now capped at `MemoryMax=300M` with
+`Restart=always`, plus a 2 GB swapfile and a 200 MB journald cap. If SSH ever
+hangs at "banner exchange" again, that is this, and it needs a **force**
+reboot from the OCI console — a graceful one hangs, because systemd is part of
+what is stuck. See [ARCHITECTURE.md §4.4](ARCHITECTURE.md).
 
 **If the first command ever returns a Cloudflare address, stop.** The scraper's
 proxy has escaped its scope and broker traffic is no longer leaving from the
