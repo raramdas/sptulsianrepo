@@ -86,6 +86,42 @@ half-yearly categorisation, held in `STOCK_CAP_CLASSIFICATION`.
 Budget is recycled when a position closes, so the ledger reflects capital
 actually at risk rather than cumulative spend.
 
+**Within those caps, conviction sets the ticket size** (2026-08-26 onward):
+
+| Lite score | Position |
+|---|---|
+| > 85 | ₹25,000 |
+| 63 – 85 | ₹10,000 |
+| < 63 | not bought |
+
+The thresholds are **percentile-matched to the lite engine's distribution**,
+and that is the load-bearing detail. A cutoff like "75" is a statement about a
+score distribution, not about a company. The full engine compressed everything
+into 50–87; the lite engine spreads across 6–100. Carrying "85/75" across
+unchanged would have kept the numbers and silently replaced the policy — the
+₹10,000 band would have fallen from 36.6% of names to 13.9%. So the cutoffs
+were re-derived from the share of names each band was meant to capture:
+
+| Band | Intended | Achieved at 85/63 |
+|---|---|---|
+| ₹25,000 | 7.2% | 9.3% |
+| ₹10,000 | 36.6% | 34.9% |
+| not bought | 56.2% | 55.8% |
+
+Two consequences worth holding onto. First, the upper cutoff rests on about
+three names out of 43 and is poorly determined; the lower one sits near the
+median where percentile estimates are stable, so 63 is far more trustworthy
+than 85. Second, this deploys **more** capital than flat sizing — roughly
+₹581k per 100 recommendations against ₹500k — so it is not a risk reduction.
+
+`CONVICTION_MIN_SCORE` is pinned to the lower band and kept at or above
+`conviction_lite.ACCEPT_FLOOR`, so sizing can never fund a name the engine's
+own verdict rejects.
+
+None of this is evidence that the score predicts returns. It fixes a
+distribution mismatch in a policy resting on an unvalidated signal; the
+argument in §3.5 still stands.
+
 ### 2.3 Trade lifecycle
 
 ```
@@ -481,9 +517,10 @@ These hold by construction and should be preserved by any future change:
    `NEEDS_REVIEW` and waits for a human.
 3. A trade is `Closed` only on a **confirmed** sell fill, never on a GTT status
    alone.
-4. Conviction scores cannot size, gate, or block an order. They did for
-   one day; the first backtest found no relationship between score and
-   outcome, so it was reverted. See `backtest_conviction.py` and §3.4.
+4. Conviction sizing is on, and its thresholds are **percentile-matched to
+   the engine that produces them**. Cutoffs are statements about a score
+   distribution, not about the world; moving them between engines unchanged
+   silently changes the policy. See §2.2 and `lib/config.py`.
 5. Manual buy paths (Needs Review, `spt_capture`) always preview before they
    commit, and the confirm step is the only thing that spends money.
 

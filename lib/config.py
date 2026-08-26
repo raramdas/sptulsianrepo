@@ -20,30 +20,50 @@ EXCHANGE   = 'NSE'
 INVEST_AMT = 5000   # flat position size for every buy
 
 # ── Buy policy ───────────────────────────────────────────────────────────
-# CONVICTION-BASED SIZING AND GATING ARE OFF (reverted 2026-08-26).
+# CONVICTION-BASED SIZING IS ON, recalibrated for the lite engine 2026-08-26.
 #
-# They were switched on 2026-08-25 (>85 -> Rs 25,000, 75-85 -> Rs 10,000,
-# below 75 not bought). The first backtest, the next day, found no
-# detectable relationship between the score and subsequent excess return:
-# symbol-level Spearman -0.127 across 37 symbols (t=-0.76), and dropping the
-# two worst symbols left -0.081. By band, the 75-85 group that would have
-# received most of the capital did WORST (-3.91% mean excess) while the
-# sub-75 group we refused to buy did best (+1.01%).
+# History matters here. It was switched on 2026-08-25 against the FULL engine
+# (>85 -> Rs 25,000, 75-85 -> Rs 10,000, below 75 not bought) and reverted the
+# next day: the first backtest found no detectable relationship between that
+# score and subsequent excess return — symbol-level Spearman -0.127 across 37
+# symbols (t=-0.76) — and the 75-85 band that would have taken most of the
+# capital did WORST (-3.91% mean excess) while the sub-75 group we refused to
+# buy did best (+1.01%).
 #
-# None of that is conclusive — two months, one regime, 12 realised closes —
-# but it is the absence of evidence for a rule that was spending real money,
-# so sizing is flat again at INVEST_AMT and the score is informational only.
-# Re-run `python3 backtest_conviction.py` as more trades close; flip this to
-# True to restore banded sizing once there is something to justify it.
-CONVICTION_SIZING_ENABLED = False
+# What changed is the engine, not that evidence. lib/conviction_lite.py scores
+# a much wider distribution (median 56, range 6-100) than the full engine's
+# compressed 50-87, so the OLD cutoffs would have silently become a different
+# policy while wearing the same numbers: the same "75" that took 36.6% of
+# names under the full engine takes only 13.9% under lite.
+#
+# The thresholds below are recalibrated on what was actually intended — the
+# SHARE of recommended names in each band — over 43 distinct symbols:
+#
+#            band          intended   achieved
+#            Rs 25,000         7.2%       9.3%   (4 names)
+#            Rs 10,000        36.6%      34.9%  (15 names)
+#            not bought       56.2%      55.8%  (24 names)
+#
+# CAVEAT ON THE UPPER BAND: 85 reproduces the 92.8th percentile, but at n=43
+# that rests on about three names and is poorly determined. The lower cutoff
+# sits near the median, where percentile estimates are most stable — so trust
+# 63 considerably more than 85, and re-run the recalibration as n grows.
+#
+# Note this deploys MORE capital than flat sizing, not less: roughly
+# Rs 581k per 100 recommendations against Rs 500k flat.
+#
+# The underlying caution has NOT been retired. There is still no evidence that
+# any conviction score predicts returns, and the lite engine has zero closed
+# trades behind it. Set this False to go back to flat INVEST_AMT.
+CONVICTION_SIZING_ENABLED = True
 
-# Retained so the rule is ready to re-enable, and so the dashboard can keep
-# colouring scores by the bands that would apply.
 CONVICTION_SIZING = [
     (85, 25000),   # score > 85        -> Rs 25,000
-    (75, 10000),   # 75 <= score <= 85 -> Rs 10,000
+    (63, 10000),   # 63 <= score <= 85 -> Rs 10,000
 ]
-CONVICTION_MIN_SCORE = 75    # below this: would not be bought, when enabled
+# Equals the lower band, and sits above lib/conviction_lite.ACCEPT_FLOOR (50)
+# so sizing never funds a name the engine's own verdict rejects.
+CONVICTION_MIN_SCORE = 63
 
 # Independent of conviction, and still ON: this is SPTulsian's own
 # disclosure, not our model's opinion, and was never part of the backtest.

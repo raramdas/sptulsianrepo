@@ -181,12 +181,16 @@ The invariants below hold by construction. Preserve them.
    `NEEDS_REVIEW` and waits for a human.
 3. A trade is `Closed` only on a **confirmed** sell fill, never on GTT status
    alone.
-4. Conviction scores do NOT size, gate, or block an order. They sized
-   orders for one day (2026-08-25/26) until the first backtest found no
-   relationship between score and subsequent excess return — symbol-level
-   rho -0.13 over 37 symbols, with the best-funded band performing worst.
-   Sizing is flat at `INVEST_AMT`. Re-run `python3 backtest_conviction.py`
-   as more trades close; `CONVICTION_SIZING_ENABLED` turns it back on.
+4. Conviction sizing is **on** (`CONVICTION_SIZING_ENABLED`), using the lite
+   engine: `>85 → ₹25,000`, `63–85 → ₹10,000`, below 63 not bought. The
+   thresholds are percentile-matched to the lite score distribution, not
+   carried over from the full engine — see `lib/config.py` for the working.
+   A score can therefore now *skip* a recommendation, so a conviction-run
+   failure holds buying; `spt_watchdog.py` alarms on unscored pending buys.
+   Note the score is still **unvalidated**: the only backtest to date found
+   no relationship between conviction and excess return. Re-run
+   `python3 backtest_conviction.py` on `model='lite'` rows as trades close,
+   and set the flag False to return to flat `INVEST_AMT`.
 5. Manual buy paths preview before they commit; the confirm step is the only
    thing that spends money.
 
