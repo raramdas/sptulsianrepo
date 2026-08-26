@@ -13,6 +13,13 @@ def ok(c, label, extra=''):
     if c: P += 1; print(f"  PASS  {label}")
     else: F += 1; print(f"  FAIL  {label}  {extra}")
 
+def parse_m(score, model):
+    html = theme.conviction_badge(score, model)
+    colour = re.search(r'color:(#[0-9A-Fa-f]{6});', html)
+    tip = re.search(r'title="([^"]*)"', html)
+    return (colour.group(1) if colour else None), (tip.group(1) if tip else '')
+
+
 def parse(score):
     html = theme.conviction_badge(score)
     colour = re.search(r'color:(#[0-9A-Fa-f]{6});', html)
@@ -77,5 +84,22 @@ for v in (None, float('nan')):
     html = theme.conviction_badge(v)
     ok('—' in html and theme.NEGATIVE not in html, f"{v!r} renders as blank dash", html[:70])
 
-print(f"\n{'='*52}\n  {P} passed, {F} failed\n{'='*52}")
+# ── model gating: bands belong to ONE engine ────────────────────────────────
+from lib.bands import SIZING_MODEL
+
+print("\n=== a score from another engine must not claim a position size ===")
+for v in (72.0, 80.0, 86.0, 62.0):
+    c_cur, tip_cur = parse_m(v, SIZING_MODEL)
+    c_old, tip_old = parse_m(v, 'full')
+    print(f"  {v:>5}  {SIZING_MODEL}: {NAME.get(c_cur,c_cur):<9} | full: {NAME.get(c_old,c_old):<9}  {tip_old}")
+    ok('not comparable' in tip_old, f"{v} scored by 'full' says so on hover", tip_old)
+    ok('sizes at' not in tip_old, f"{v} scored by 'full' makes no sizing claim", tip_old)
+
+print("\n=== current-engine scores still claim their size ===")
+c, tip = parse_m(81.1, SIZING_MODEL)
+ok('sizes at Rs 10,000' in tip, "lite 81.1 -> 'sizes at Rs 10,000'", tip)
+c, tip = parse_m(81.1, None)
+ok('sizes at Rs 10,000' in tip, "model unknown (None) -> assumes current engine", tip)
+
+print(f"\n{'='*52}\n  {P} passed, {F} failed  (with model gating)\n{'='*52}")
 sys.exit(1 if F else 0)

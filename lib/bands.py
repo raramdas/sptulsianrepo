@@ -36,10 +36,16 @@ CONVICTION_SIZING = [
 # so sizing never funds a name the engine's own verdict rejects.
 CONVICTION_MIN_SCORE = 63
 
-# Fallback banding for display when sizing is disabled: the engine's own
-# tiers, which are what the score means when it is not deciding anything.
-# Mirrors conviction_lite.TIERS / conviction.TIERS.
+# Fallback banding for display when sizing is disabled, or when a score came
+# from a different engine: the engine's own tiers, which are what a score
+# means when it is not deciding anything. Mirrors conviction_lite.TIERS.
 DISPLAY_TIERS = (80, 65, 50)
+
+# Which engine's distribution the thresholds above were matched to. A score
+# from any other engine must NOT be shown as if these bands applied to it —
+# they are percentile statements about one distribution, and the full
+# engine's scores cluster in 50-87 where 85/63 is close to meaningless.
+SIZING_MODEL = 'lite'
 
 
 def size_for(score):

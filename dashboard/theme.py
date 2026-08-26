@@ -53,10 +53,11 @@ try:
                            CONVICTION_SIZING as _BANDS,
                            CONVICTION_MIN_SCORE as _BANDS_MIN,
                            DISPLAY_TIERS as _BANDS_TIERS,
+                           SIZING_MODEL,
                            size_for as _band_size)
 except ImportError:  # pragma: no cover - deployment safety net
     _BANDS_ENABLED, _BANDS, _BANDS_MIN = False, [], 0
-    _BANDS_TIERS, _band_size = (80, 65, 50), lambda s: None
+    _BANDS_TIERS, _band_size, SIZING_MODEL = (80, 65, 50), lambda s: None, 'lite'
 
 BG        = "#FAFAFA"
 CARD      = "#FFFFFF"
@@ -504,7 +505,7 @@ def friendly_status(status, notes):
     return status
 
 
-def conviction_badge(score):
+def conviction_badge(score, model=SIZING_MODEL):
     """Score as a colour-coded chip, coloured by what the score actually DOES.
 
     Blank when never scored — an unscored trade is 'we do not know', which
@@ -517,19 +518,28 @@ def conviction_badge(score):
     accepted, then amber spanning the boundary between funded and not funded.
     Deriving it removes the possibility rather than fixing the instance.
 
-    When sizing is on, each colour means one position size. When it is off,
-    the score decides nothing, so it falls back to the engine's own tiers.
+    `model` is which engine produced the score, and it gates the sizing claim.
+    The thresholds are percentile-matched to ONE engine's distribution, so
+    applying them to another's is meaningless: the full engine's scores
+    cluster in 50-87, and banding those at 85/63 puts 69% of the ledger in
+    the "Rs 10,000" colour for a sizing rule that never applied to them and
+    could not have. Historical scores therefore fall back to tier banding and
+    say so on hover, rather than asserting a counterfactual position size.
+
+    When sizing is on and the score came from the current engine, each colour
+    means one position size. Otherwise it falls back to the engine's tiers.
     """
     import pandas as _pd
     if score is None or (isinstance(score, float) and score != score) or _pd.isna(score):
         return '<span style="color:#9CA3AF;">—</span>'
     v = float(score)
+    stale_model = bool(model) and model != SIZING_MODEL
 
     # The chip shows a rounded score for width, but the tooltip must not: at
     # one decimal, 62.9 reads "below the 63 floor"; rounded, it reads
     # "63 — below the 63 floor", which contradicts itself precisely at the
     # boundary where someone would go looking for an explanation.
-    if _BANDS_ENABLED:
+    if _BANDS_ENABLED and not stale_model:
         amount = _band_size(v)
         if amount is None:
             colour, tip = NEGATIVE, f'{v:.1f} — below the {_BANDS_MIN} floor, not bought'
@@ -543,7 +553,9 @@ def conviction_badge(score):
                   ACCENT   if v >= mid else
                   WARNING  if v >= lo else
                   NEGATIVE)
-        tip = f'{v:.1f} — display only, sizing disabled'
+        tip = (f'{v:.1f} — scored by the {model} engine, not comparable to '
+               f'current sizing' if stale_model
+               else f'{v:.1f} — display only, sizing disabled')
 
     return (f'<span title="{tip}" style="display:inline-block;min-width:2.4rem;'
             f'text-align:center;padding:1px 7px;border-radius:999px;'

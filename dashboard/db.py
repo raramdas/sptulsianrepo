@@ -136,7 +136,7 @@ def trades(status=None, category=None, symbol=None, date_from=None, date_to=None
                t.invested_amount, t.target_price, t.gtt_id, t.gtt_status,
                t.my_sell_date, t.my_sell_price, t.my_gain_loss, t.notes,
                c.score AS conviction, c.tier AS conviction_tier,
-               c.verdict AS conviction_verdict
+               c.verdict AS conviction_verdict, c.model AS conviction_model
         FROM trades t
         LEFT JOIN (SELECT trade_id, MAX(score_id) AS score_id
                      FROM conviction_scores GROUP BY trade_id) latest
@@ -170,7 +170,7 @@ def all_recommendations():
     return _df("""
         SELECT t.trade_id, t.buy_date, t.stock_name, t.recommended_price,
                t.target_price, t.status, t.notes, t.have_interest,
-               c.score AS conviction
+               c.score AS conviction, c.model AS conviction_model
         FROM trades t
         LEFT JOIN (SELECT trade_id, MAX(score_id) AS score_id
                      FROM conviction_scores GROUP BY trade_id) latest
@@ -720,9 +720,14 @@ def conviction_by_symbol():
     Holdings are per symbol while scores are per trade, and a symbol is often
     held across several lots scored on different days. Takes the most recent
     score for the symbol, which is the current read on that company.
+
+    Returns symbol -> (score, model). The model travels with the score
+    because the sizing bands are percentile-matched to one engine, so the
+    badge must know which engine produced a number before colouring it as a
+    position size.
     """
     df = _df("""
-        SELECT c.symbol, c.score
+        SELECT c.symbol, c.score, c.model
         FROM conviction_scores c
         JOIN (SELECT symbol, MAX(score_id) AS score_id
                 FROM conviction_scores WHERE symbol IS NOT NULL
@@ -731,7 +736,7 @@ def conviction_by_symbol():
     """)
     if df.empty:
         return {}
-    return {str(r['symbol']).upper(): r['score'] for _, r in df.iterrows()}
+    return {str(r['symbol']).upper(): (r['score'], r['model']) for _, r in df.iterrows()}
 
 
 def conviction_latest():

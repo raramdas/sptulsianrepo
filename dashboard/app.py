@@ -204,9 +204,10 @@ def page_overview():
                 d['quantity'] = d['quantity'].astype(int)
                 # Holdings are per symbol, conviction is per trade — map on
                 # symbol and show the most recent read on that company.
-                d.insert(1, 'conviction',
-                         d['symbol'].astype(str).str.upper().map(conv_map)
-                          .apply(theme.conviction_badge))
+                d.insert(1, 'conviction', [
+                    theme.conviction_badge(*(conv_map.get(str(s).upper()) or (None, None)))
+                    for s in d['symbol']
+                ])
                 st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
 
             if tagged.empty:
@@ -380,9 +381,10 @@ def page_drilldown():
             money_cols = ['average_cost', 'last_price', 'current_value', 'pnl']
             d = cat_holdings[display_cols].rename(columns={'average_price': 'average_cost', 'account_label': 'account'}).copy()
             d['quantity'] = d['quantity'].astype(int)
-            d.insert(1, 'conviction',
-                     d['symbol'].astype(str).str.upper().map(conv_map)
-                      .apply(theme.conviction_badge))
+            d.insert(1, 'conviction', [
+                theme.conviction_badge(*(conv_map.get(str(s).upper()) or (None, None)))
+                for s in d['symbol']
+            ])
             st.markdown(theme.render_table(d, money_cols=money_cols, gain_col='pnl'), unsafe_allow_html=True)
         st.caption("From the last Kite sync — click 'Sync Kite Data' on Overview to refresh. For full trade "
                    "history in this category (including closed/error/skipped), use Trades Explorer.")
@@ -439,9 +441,16 @@ def _render_trades_table(tdf):
     if 'conviction' in tdf.columns:
         # Rendered as a badge banded to match the sizing thresholds, so the
         # number that decided the position size is visible next to the trade.
-        tdf['conviction'] = tdf['conviction'].apply(theme.conviction_badge)
+        # The engine is passed too: the bands are percentile-matched to one
+        # engine's distribution, so a score from an older one must not be
+        # coloured as though those bands applied to it.
+        tdf['conviction'] = [
+            theme.conviction_badge(s, m) for s, m in
+            zip(tdf['conviction'], tdf.get('conviction_model', pd.Series(None, index=tdf.index)))
+        ]
     money_cols = ['my_buy_price', 'invested_amount', 'target_price', 'my_sell_price', 'my_gain_loss']
-    hidden = ('trade_id', 'notes', 'conviction_tier', 'conviction_verdict')
+    hidden = ('trade_id', 'notes', 'conviction_tier', 'conviction_verdict',
+              'conviction_model')
     display_cols = [c for c in tdf.columns if c not in hidden]
     # Conviction sits next to the stock it describes, rather than trailing the
     # row where it reads as an afterthought.
@@ -506,7 +515,10 @@ def page_recommendations():
     display['Status'] = df.apply(lambda r: theme.friendly_status(r['status'], r.get('notes')), axis=1)
     # Both inputs the buy gate reads, next to the outcome — so a skip can be
     # explained from the row itself rather than by opening the notes.
-    display['Conviction'] = df['conviction'].apply(theme.conviction_badge)
+    display['Conviction'] = [
+        theme.conviction_badge(s, m) for s, m in
+        zip(df['conviction'], df.get('conviction_model', pd.Series(None, index=df.index)))
+    ]
     display['SPT Interest'] = df['have_interest'].fillna('').replace('', '—')
     st.caption(f"{len(display)} recommendation(s)")
     st.markdown(
