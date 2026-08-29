@@ -330,6 +330,9 @@ section[data-testid="stSidebar"] .stRadio [role="radiogroup"] label:has(input:ch
 .status-pill-skipped       {{ color: {WARNING};  background-color: #FEF3C7; }}
 .status-pill-needs_review  {{ color: {ACCENT};   background-color: {ACCENT_DIM}; }}
 .status-pill-pending_fill  {{ color: {ACCENT};   background-color: {ACCENT_DIM}; }}
+/* Amber, not red: nothing failed. It is an instruction that needs acting on. */
+.status-pill-advisory_sell {{ color: #92400E; background-color: #FEF3C7;
+                              font-weight: 700; }}
 .status-pill-pending_buy  {{ color: {ACCENT};   background-color: {ACCENT_DIM}; }}
 
 /* Login form */
@@ -493,6 +496,11 @@ def friendly_status(status, notes):
         return f'Error — {n}' if n else 'Error'
     if s == 'SKIPPED':
         return f'Skipped — {n}' if n else 'Skipped'
+    if s == 'ADVISORY_SELL':
+        # Loud on purpose. This is the one status that says an open position's
+        # thesis has been withdrawn while its GTT still rests at the original
+        # target, and it needs a human to act rather than merely to notice.
+        return 'SELL called — not bought, review holdings'
     if s == 'NEEDS_REVIEW':
         return 'Needs Review'
     if s == 'PENDING_BUY':

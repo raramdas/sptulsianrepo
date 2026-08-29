@@ -16,7 +16,25 @@ from lib.config import log
 from lib.kite_client import get_enctoken, resolve_kite_symbol
 from lib.email_reader import parse_todays_emails
 from lib.spt_scraper import refresh_spt_data, scrape_spt_stock, quit_spt_driver
-from lib.budget_manager import get_stock_cap_type, insert_trade_to_oracle, close_oracle_connection
+from lib.budget_manager import (get_stock_cap_type, insert_trade_to_oracle,
+                                close_oracle_connection, open_qty_for_symbol)
+
+
+def holdings_qty_for(symbol):
+    """Shares of `symbol` the ledger currently shows as held. 0 when unknown.
+
+    Used only to make a SELL alert actionable — "they said exit and you hold
+    340 shares" is a different message from "they said exit and you own none".
+    Never blocks anything, so a lookup failure degrades to the quieter wording
+    rather than losing the alert.
+    """
+    if not symbol:
+        return 0
+    try:
+        return open_qty_for_symbol(symbol) or 0
+    except Exception as e:
+        log(f"  (could not check holdings for {symbol}: {type(e).__name__})")
+        return 0
 
 
 def process_tip(tip, enctoken):
@@ -39,6 +57,30 @@ def process_tip(tip, enctoken):
 
     kite_symbol, symbol_status = resolve_kite_symbol(tip['stock'], enctoken)
     tip['kite_symbol'] = kite_symbol or ''
+
+    # A Sell call must never become a buy. Direction comes from two places and
+    # either one saying Sell is enough: the email ("Call added: X (Sell @ N)")
+    # and SPTulsian's own buy_sell field on the call row. They are checked
+    # together because the email pattern is the only source for sections whose
+    # portal rows carry no direction, and the portal is the only source when an
+    # email is missed.
+    email_dir = (tip.get('direction') or '').strip().title()
+    spt_dir = (tip.get('spt_direction') or '').strip().title()
+    if 'Sell' in (email_dir, spt_dir):
+        held = holdings_qty_for(tip['kite_symbol'])
+        tip['buy_status'] = 'ADVISORY_SELL'
+        tip['note'] = (
+            f'SPTulsian issued a SELL on "{tip["stock"]}" '
+            f'(email={email_dir or "n/a"}, portal={spt_dir or "n/a"}). Not bought. '
+            + (f'You currently hold {held} share(s) — the open position still has a '
+               f'GTT resting at the original target, which this call withdraws. '
+               f'Decide whether to exit.'
+               if held else 'No open position in this symbol.'))
+        log(f"!! ADVISORY SELL: {tip['stock']} ({tip['kite_symbol'] or 'unresolved'}) — "
+            f"NOT buying. Holding {held} share(s).")
+        log(f"   {tip['note']}")
+        insert_trade_to_oracle(tip, None)
+        return
 
     if symbol_status not in ('MANUAL', 'EXACT'):
         # Same rule as always: never buy on a guess. Flag for review — now

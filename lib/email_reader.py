@@ -144,19 +144,29 @@ def parse_todays_emails():
         body = get_email_body_text(msg)
         text = subj + ' ' + body
 
-        matches = re.findall(r'Call added[:\s]*([^(]+?)\s*\(Buy\s*@\s*([\d.]+)\)', text, re.IGNORECASE)
+        # Direction is captured, not assumed. This pattern used to hardcode
+        # "Buy", so a Sell call did not match and was dropped in silence —
+        # never logged as a tip, never recorded. The bot would not have bought
+        # it, but nothing would have told anyone the advisory had reversed on a
+        # position still being held to its original target.
+        matches = re.findall(
+            r'Call added[:\s]*([^(]+?)\s*\((Buy|Sell)\s*@\s*([\d.]+)\)',
+            text, re.IGNORECASE)
         log(f"  Tip matches found: {matches}")
 
-        for stock, price_str in matches:
+        for stock, direction, price_str in matches:
             stock = stock.strip()
+            direction = (direction or '').strip().title()  # 'Buy' | 'Sell'
             try:
                 price = float(price_str)
             except ValueError:
                 continue
             if stock and price:
                 category = extract_category(subj)
-                tips.append({'date': today, 'stock': stock, 'email_price': price, 'category': category})
-                log(f"  ✅ Tip: {stock} @ {price}")
+                tips.append({'date': today, 'stock': stock, 'email_price': price,
+                             'category': category, 'direction': direction})
+                mark = '✅' if direction == 'Buy' else '🔻'
+                log(f"  {mark} Tip: {stock} @ {price} [{direction}]")
 
     mail.logout()
     return tips

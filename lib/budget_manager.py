@@ -19,6 +19,20 @@ from lib.config import (
 _oracle_conn = None
 
 
+# Statuses that mean "no stock was bought". insert_trade_to_oracle falls back
+# to 'Open' for anything not listed here, so an omission records a phantom
+# position holding real shares — add new non-buying statuses to this tuple.
+#
+#   ERROR          an order was attempted and failed
+#   SKIPPED        a gate refused it, or a retry ran out
+#   NEEDS_REVIEW   the symbol could not be resolved confidently
+#   PENDING_BUY    queued, not yet priced
+#   PENDING_FILL   order placed, fill not yet confirmed
+#   ADVISORY_SELL  SPTulsian issued a SELL on this name; never buy it
+NON_BUYING_STATUSES = ('ERROR', 'SKIPPED', 'NEEDS_REVIEW', 'PENDING_BUY',
+                       'PENDING_FILL', 'ADVISORY_SELL')
+
+
 def get_oracle_connection():
     global _oracle_conn
     if _oracle_conn:
@@ -187,9 +201,14 @@ def insert_trade_to_oracle(tip, category_id):
         today = datetime.now(IST).date()
         buy_status = tip.get('buy_status')
         # Only trades that actually went through count as invested money.
-        # SKIPPED/ERROR/NEEDS_REVIEW/PENDING_BUY trades never spent anything,
-        # regardless of the qty/price that was calculated for the budget check.
-        if buy_status in ('ERROR', 'SKIPPED', 'NEEDS_REVIEW', 'PENDING_BUY'):
+        # These statuses never spent anything, regardless of the qty/price
+        # that was calculated for the budget check.
+        #
+        # This list is a whitelist and the fallback below is 'Open', so a
+        # status missing from it is recorded as a live position holding real
+        # stock. Any new non-buying status MUST be added here and to the
+        # matching list below.
+        if buy_status in NON_BUYING_STATUSES:
             invested_amount = 0
         else:
             invested_amount = (tip.get('buy_price') or 0) * (tip.get('qty') or 0)
@@ -223,7 +242,8 @@ def insert_trade_to_oracle(tip, category_id):
             'spt_below_reco': tip.get('spt_below_reco'),
             'spt_direction': (tip.get('spt_direction') or '')[:16],
             'spt_rationale': (tip.get('spt_rationale') or '')[:2000] or None,
-            'status': tip.get('buy_status') if tip.get('buy_status') in ('ERROR', 'SKIPPED', 'NEEDS_REVIEW', 'PENDING_BUY') else 'Open',
+            'status': (tip.get('buy_status') if tip.get('buy_status') in NON_BUYING_STATUSES
+                       else 'Open'),
             'my_buy_date': today,
             'order_type': tip.get('order_type', ''),
             'buy_order_id': tip.get('buy_order_id', ''),
@@ -547,6 +567,36 @@ def get_latest_conviction(trade_id):
     except Exception as e:
         log(f"  get_latest_conviction error: {e}")
         return None
+
+
+def advisory_sells_today():
+    """SELL calls recorded today, with how much of each we still hold.
+
+    The held quantity is the whole point: "they said exit" and "they said exit
+    and you own 340 shares against a GTT that no longer reflects their view"
+    are different messages, and only the second needs acting on this morning.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT s.trade_id, s.stock_name, s.symbol,
+                   NVL((SELECT SUM(NVL(o.my_buy_qty, 0)) FROM trades o
+                         WHERE o.symbol = s.symbol AND o.status = 'Open'), 0) AS held_qty
+            FROM trades s
+            WHERE s.status = 'ADVISORY_SELL'
+              AND s.buy_date >= TRUNC(SYSDATE)
+            ORDER BY s.trade_id
+        """)
+        cols = [d[0].lower() for d in cur.description]
+        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        cur.close()
+        return rows
+    except Exception as e:
+        log(f"  advisory_sells_today error: {e}")
+        return []
 
 
 def open_qty_for_symbol(symbol, exclude_trade_id=None):

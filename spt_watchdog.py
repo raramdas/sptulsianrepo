@@ -51,7 +51,7 @@ from lib.config import (log, IST, GMAIL_USER, GMAIL_APP_PASSWORD,
                         CONVICTION_SIZING_ENABLED)
 from lib.spt_scraper import read_watermark
 from lib.budget_manager import (unscored_pending_buys, pending_buys_missing_interest,
-                                 close_oracle_connection)
+                                 advisory_sells_today, close_oracle_connection)
 
 ABSOLUTE_STALE_HOURS = 30
 TRADING_DAY_DEADLINE = (10, 30)  # 10:30 IST — after the 9:30 recommend run
@@ -130,6 +130,25 @@ def check_buy_inputs(now_ist=None):
             f"'Have Interest' value — the scrape found no matching live call, so the "
             f"buy is held: {names}{' ...' if len(blank) > 6 else ''}. "
             f"Re-run: python3 main_recommend.py")
+
+    # A SELL is the one advisory signal the system cannot act on by itself.
+    # Everything else here reports something that stopped a buy; this reports
+    # a position we may still be holding, with a GTT resting at a target the
+    # advisory has just withdrawn. Nothing in the pipeline will close it, so
+    # if this does not reach a human it reaches no one.
+    try:
+        for r in advisory_sells_today():
+            held = r.get('held_qty') or 0
+            problems.append(
+                f"SPTulsian issued a SELL on {r['stock_name']} "
+                f"({r.get('symbol') or 'unresolved'}). It was NOT bought. "
+                + (f"You still hold {held} share(s), and the open position's GTT is "
+                   f"still resting at the original target — this call withdraws that "
+                   f"thesis. Decide whether to exit."
+                   if held else
+                   "No open position in this symbol, so nothing to unwind."))
+    except Exception as e:
+        log(f"WARNING: could not check advisory sells: {e}")
     return problems
 
 
