@@ -690,6 +690,44 @@ def apply_retry_buy(trade_id, category_id, symbol, stock_type, order_type,
         conn.close()
 
 
+def resolve_needs_review(trade_id, symbol, cap_type=None):
+    """Record a human's symbol resolution and return the trade to the queue.
+
+    This is the ONLY thing resolving a NEEDS_REVIEW trade does. It does not
+    buy. The trade goes back to PENDING_BUY and the normal 11:00 run then
+    applies every gate to it — SPTulsian Have Interest, a fresh conviction
+    score, banded position sizing, budget. Resolving an ambiguous ticker is a
+    statement about identity, not a decision to take a position, and the
+    dashboard previously conflated the two: confirming a symbol placed a real
+    order at a hardcoded Rs 5,000 that no gate had approved.
+
+    resolved_at is stamped so the buy query picks the trade up even when the
+    original recommendation is older than its window. buy_attempts resets
+    because the retry budget belongs to price attempts, and none have
+    happened — this trade has never been priced.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE trades
+            SET symbol = :sym,
+                stock_type = NVL(:cap, stock_type),
+                status = 'PENDING_BUY',
+                resolved_at = SYSDATE,
+                buy_attempts = 0,
+                notes = :note,
+                updated_at = SYSTIMESTAMP
+            WHERE trade_id = :id AND status = 'NEEDS_REVIEW'
+        """, {'sym': symbol.strip().upper(), 'cap': cap_type, 'id': trade_id,
+              'note': (f'Symbol resolved to {symbol.strip().upper()} by a human; '
+                       f'returned to the buy queue for normal gating.')})
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
 def update_trade_target(trade_id, target_price, have_interest, timeframe):
     """Set target price / have-interest / timeframe on a trade (Oracle-native, no sheet involved)."""
     conn = get_connection()

@@ -122,9 +122,22 @@ def find_sell_order_for_symbol(symbol, qty, enctoken, min_price=None, exclude_or
     }
 
 
-def get_order_status(order_id, enctoken, symbol_hint=None):
+def get_order_status(order_id, enctoken, symbol_hint=None,
+                     expected_qty=None, unexplained_qty=None):
     """Find order status and filled qty from Kite orders list.
-    Falls back to holdings (persists across days) if the order isn't in today's list."""
+
+    Falls back to holdings (which persist across days) if the order is in
+    neither today's list nor order history — but only when the caller supplies
+    `unexplained_qty`: how many shares of this symbol are NOT already claimed
+    by other open lots in the ledger. Holdings are per symbol and orders are
+    per lot, so without that number the fallback cannot tell this order's
+    shares from anyone else's. `expected_qty` (what the order asked for) caps
+    the claim further.
+
+    Returns status 'NOT_FILLED' when holdings are fully explained by other
+    lots — a positive statement that this order did not fill, not an absence
+    of information.
+    """
     try:
         orders = get_all_orders(enctoken)
         matched = [o for o in orders if str(o.get('order_id', '')) == str(order_id)]
@@ -148,18 +161,41 @@ def get_order_status(order_id, enctoken, symbol_hint=None):
                     'avg_price':  float(o.get('average_price', 0) or 0),
                     'symbol':     o.get('tradingsymbol', ''),
                 }
-            # Fallback: check holdings for a previous-day fill
-            if symbol_hint:
+            # Fallback: infer a previous-day fill from holdings.
+            #
+            # Holdings are per SYMBOL; orders are per lot. This fallback used
+            # to return the entire holding as this order's filled_qty, which
+            # is only correct when the symbol is held in exactly one lot. On
+            # 2026-08-28 it marked a 3-share BSE order COMPLETE for 8 shares —
+            # every one of which belonged to eight earlier one-share trades —
+            # recording Rs 26,608 of stock that was never bought, in a trade
+            # that had not filled at all.
+            #
+            # So the caller must say how many shares are NOT already explained
+            # by other open lots. Without that number there is no sound
+            # inference to make and the fallback declines to guess.
+            if symbol_hint and unexplained_qty is not None:
                 held = get_holding_qty(symbol_hint, enctoken)
-                if held > 0:
-                    log(f"  Order {order_id} not in orders, but {held} shares of {symbol_hint} "
-                        f"found in holdings — treating as COMPLETE")
+                claimable = min(int(unexplained_qty), held)
+                if expected_qty is not None:
+                    claimable = min(claimable, int(expected_qty))
+                if claimable > 0:
+                    log(f"  Order {order_id} not in orders; {held} {symbol_hint} held, "
+                        f"{unexplained_qty} unexplained by other lots — "
+                        f"treating as COMPLETE for {claimable}")
                     return {
                         'status':        'COMPLETE',
-                        'filled_qty':    held,
+                        'filled_qty':    claimable,
                         'symbol':        symbol_hint.upper(),
                         'from_holdings': True,
                     }
+                log(f"  Order {order_id} not in orders; all {held} {symbol_hint} share(s) "
+                    f"are accounted for by other open lots — this order did NOT fill")
+                return {'status': 'NOT_FILLED', 'filled_qty': 0,
+                        'symbol': symbol_hint.upper(), 'from_holdings': True}
+            if symbol_hint:
+                log(f"  Order {order_id} not in orders and no unexplained-quantity "
+                    f"context supplied — declining to infer a fill from holdings")
             log(f"  Order {order_id} not found in orders or holdings — may be unfilled or sold")
     except Exception as e:
         log(f"  get_order_status error for {order_id}: {e}")

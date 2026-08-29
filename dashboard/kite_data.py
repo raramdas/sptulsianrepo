@@ -12,11 +12,17 @@ other read function here reads back the last-synced snapshot from Oracle
 (kite_holdings_snapshot / kite_gtt_snapshot / kite_orders_snapshot,
 written by db.save_kite_snapshot()).
 
-The one deliberate exception is the Needs Review retry-buy flow
-(preview_retry_buy / confirm_retry_buy) — a manually-triggered, one-off
-live quote + real order placement for a single trade the buy bot refused
-to guess a symbol for. preview_retry_buy() places nothing; confirm_retry_buy()
-is the only function in this entire module that trades.
+**This module does not trade.** It reads Kite and writes Oracle; no
+function here places an order.
+
+It used to. The Needs Review flow (preview_retry_buy / confirm_retry_buy)
+placed a real order the moment a human confirmed a symbol, at a hardcoded
+Rs 5,000, bypassing the Have Interest gate, conviction scoring and banded
+sizing. That conflated two different decisions: "which instrument is this?"
+and "should we take a position?". Resolving an ambiguous ticker now only
+answers the first — preview_symbol_resolution() validates the symbol and
+confirm_symbol_resolution() returns the trade to PENDING_BUY, where the
+normal 11:00 run applies every gate.
 
 Same enctoken-based login as kite_client.py/kite_common.py (the bot side),
 reused here rather than duplicated.
@@ -32,7 +38,11 @@ from dotenv import load_dotenv
 
 import db
 
-INVEST_AMT = 5000  # mirrors config.py's INVEST_AMT — keep in sync if that ever changes
+# INVEST_AMT used to be duplicated here with the note "keep in sync if that
+# ever changes". It did not stay in sync: sizing moved to conviction bands on
+# 2026-08-26 and this copy kept buying at a flat Rs 5,000. Nothing in this
+# module sizes a position any more — the buy path lives solely in main.py,
+# which reads lib/bands.py — so there is nothing left to keep in sync.
 
 load_dotenv('/home/ubuntu/.env')
 
@@ -358,12 +368,20 @@ def get_quote(symbol, account_label='NEW'):
                        f"double check the symbol is correct")
 
 
-def preview_retry_buy(trade_id, symbol):
-    """Compute what a retry-buy WOULD do for a NEEDS_REVIEW trade, given a
-    manually-corrected symbol — live quote, cap-type lookup, the same
-    price/order-type/qty decision and budget check main.py's process_tip()
-    uses. Places NO order. Always call this before confirm_retry_buy() and
-    show the result to a human — never skip straight to confirming."""
+def preview_symbol_resolution(trade_id, symbol):
+    """Validate a human-supplied symbol for a NEEDS_REVIEW trade.
+
+    Places NO order and never has. Resolving a NEEDS_REVIEW tip answers
+    "which instrument is this?", not "should we take a position?" — the
+    second question belongs to the 11:00 buy run, which applies the Have
+    Interest gate, a fresh conviction score, banded sizing and the budget
+    check. This function only confirms the ticker is real and shows enough
+    context for a human to be sure it is the right company.
+
+    Replaces preview_retry_buy/confirm_retry_buy, which placed a real order
+    at a hardcoded Rs 5,000 the moment a symbol was confirmed, bypassing
+    every one of those gates. That is how KIRLOSENG was bought unscored.
+    """
     rows = db.needs_review_trades()
     match = rows[rows['trade_id'] == trade_id]
     if match.empty:
@@ -374,61 +392,40 @@ def preview_retry_buy(trade_id, symbol):
     if not symbol:
         raise RuntimeError("Enter a symbol first")
 
-    category = row['category_name']
-    email_price = float(row['recommended_price'])
-    mkt_price = get_quote(symbol, 'NEW')
-
-    if mkt_price < email_price:
-        buy_price, order_type = mkt_price, 'MARKET'
-    else:
-        buy_price, order_type = email_price, 'LIMIT'
-
-    qty = max(1, math.floor(INVEST_AMT / buy_price))
-    actual_cost = qty * buy_price
+    # A live quote is the check that matters: it fails for a symbol Kite does
+    # not trade, which is exactly the mistake this screen exists to prevent.
+    try:
+        mkt_price = get_quote(symbol, 'NEW')
+    except Exception as e:
+        raise RuntimeError(f"Could not get a live quote for '{symbol}' — "
+                           f"check the symbol is exactly as Kite spells it. ({e})")
+    if not mkt_price:
+        raise RuntimeError(f"No live price for '{symbol}' — is that a tradable NSE symbol?")
 
     cap_type = db.get_stock_cap_type(symbol)
-    budget_ok, category_id = db.check_budget_available(category, cap_type, actual_cost, symbol=symbol)
-
     return {
-        'trade_id': int(trade_id), 'category': category, 'category_id': category_id,
-        'stock_name': row['stock_name'], 'symbol': symbol, 'cap_type': cap_type,
-        'email_price': email_price, 'mkt_price': mkt_price,
-        'buy_price': buy_price, 'order_type': order_type,
-        'qty': qty, 'actual_cost': actual_cost, 'budget_ok': budget_ok,
+        'trade_id': int(trade_id),
+        'stock_name': row['stock_name'],
+        'category': row['category_name'],
+        'symbol': symbol,
+        'cap_type': cap_type,
+        'email_price': float(row['recommended_price']),
+        'mkt_price': mkt_price,
     }
 
 
-def confirm_retry_buy(preview):
-    """Place the real buy order for a previewed retry-buy, then update
-    Oracle. The ONLY function in this module that trades — takes exactly
-    the dict preview_retry_buy() returned, never raw user input, so what
-    gets bought is always what was already shown and reviewed."""
-    if not preview.get('budget_ok'):
-        raise RuntimeError("Budget check failed for this category/stock-type — "
-                            "the live bot would SKIP this trade, not buy it")
-    enctoken = _get_enctoken('NEW')
-    payload = {
-        'exchange': 'NSE', 'tradingsymbol': preview['symbol'],
-        'transaction_type': 'BUY', 'quantity': preview['qty'],
-        'order_type': preview['order_type'], 'product': 'CNC',
-        'validity': 'DAY', 'tag': 'SPT',
-    }
-    if preview['order_type'] == 'LIMIT':
-        payload['price'] = preview['buy_price']
-    r = requests.post(f'{OMS_BASE}/orders/regular', headers=kite_headers(enctoken), data=payload, timeout=15)
-    res = r.json()
-    if res.get('status') != 'success':
-        raise RuntimeError(f"Buy failed: {res.get('message')}")
-    buy_order_id = res['data']['order_id']
+def confirm_symbol_resolution(preview):
+    """Save the resolved symbol and return the trade to the buy queue.
 
-    db.apply_retry_buy(
-        trade_id=preview['trade_id'], category_id=preview['category_id'],
-        symbol=preview['symbol'], stock_type=preview['cap_type'],
-        order_type=preview['order_type'], buy_order_id=buy_order_id,
-        market_price=preview['mkt_price'], buy_price=preview['buy_price'],
-        qty=preview['qty'], invested_amount=preview['actual_cost'],
+    Writes Oracle and nothing else — this module no longer places orders
+    from the dashboard at all. The next scheduled run decides whether to buy
+    and for how much.
+    """
+    return db.resolve_needs_review(
+        trade_id=preview['trade_id'],
+        symbol=preview['symbol'],
+        cap_type=preview['cap_type'],
     )
-    return buy_order_id
 
 
 if __name__ == '__main__':

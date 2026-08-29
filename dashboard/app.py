@@ -545,8 +545,10 @@ def _needs_review_reason(notes):
 def page_needs_review():
     st.title("Needs Review")
     st.caption("Tips the buy bot refused to guess a symbol for, rather than risk buying the wrong stock. "
-               "Enter the correct Kite symbol, preview exactly what it would buy, then confirm to place "
-               "a real order — nothing is bought until you click Confirm.")
+               "Confirm which instrument it is — that is all this screen does. The trade then rejoins "
+               "the normal queue and the next 11:00 run decides whether to buy it and for how much, "
+               "applying the same Have Interest, conviction and budget gates as everything else. "
+               "**Nothing is bought from this page.**")
 
     df = db.needs_review_trades()
     if df.empty:
@@ -565,36 +567,41 @@ def page_needs_review():
                                        placeholder="e.g. VOLTAMP").strip().upper()
 
             preview_key = f'nr_preview_{tid}'
-            col_preview, col_confirm = st.columns([1, 2])
-            with col_preview:
-                if st.button("Preview", key=f'nr_preview_btn_{tid}', disabled=not symbol):
+            col_check, _col_rest = st.columns([1, 2])
+            with col_check:
+                if st.button("Check symbol", key=f'nr_preview_btn_{tid}', disabled=not symbol):
                     try:
-                        st.session_state[preview_key] = kite_data.preview_retry_buy(tid, symbol)
+                        st.session_state[preview_key] = kite_data.preview_symbol_resolution(tid, symbol)
                     except Exception as e:
                         st.session_state.pop(preview_key, None)
                         st.error(str(e))
 
             preview = st.session_state.get(preview_key)
             if preview and preview['symbol'] != symbol:
-                st.caption("Symbol changed since last preview — click Preview again before confirming.")
+                st.caption("Symbol changed since it was checked — click Check symbol again.")
             elif preview:
                 st.markdown(
-                    f"Would place: **{preview['order_type']}** {preview['qty']} × {preview['symbol']} "
-                    f"@ {fmt(preview['buy_price'])} — actual cost {fmt(preview['actual_cost'])} "
-                    f"(live market price {fmt(preview['mkt_price'])}, cap type: {preview['cap_type'] or 'unknown'})"
+                    f"**{preview['symbol']}** is tradable — live price "
+                    f"{fmt(preview['mkt_price'])} (advisory quoted "
+                    f"{fmt(preview['email_price'])}), cap type "
+                    f"{preview['cap_type'] or 'unknown'}."
                 )
-                if not preview['budget_ok']:
-                    st.error("Insufficient budget in this category/stock-type — the live bot would SKIP "
-                             "this trade rather than buy it, so Confirm is disabled.")
-                else:
-                    if st.button(f"Confirm & Buy #{tid} — places a REAL order", key=f'nr_confirm_{tid}', type="primary"):
-                        try:
-                            order_id = kite_data.confirm_retry_buy(preview)
-                            st.success(f"Bought — order {order_id}")
-                            st.session_state.pop(preview_key, None)
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Buy failed: {e}")
+                st.caption("Check this is the same company as "
+                           f"'{preview['stock_name']}' before confirming — a plausible "
+                           "symbol for the wrong company is exactly what this screen "
+                           "exists to catch.")
+                if st.button(f"Confirm symbol for #{tid}", key=f'nr_confirm_{tid}', type="primary"):
+                    try:
+                        n = kite_data.confirm_symbol_resolution(preview)
+                        if n:
+                            st.success(f"Saved as {preview['symbol']} — queued for the next "
+                                       f"buy run, which will score and gate it normally.")
+                        else:
+                            st.warning("Nothing updated — the trade may no longer be in review.")
+                        st.session_state.pop(preview_key, None)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not save: {e}")
 
 
 CONVICTION_TONES = {

@@ -241,6 +241,12 @@ def get_pending_buy_trades(scan_dates=None, retry_days=0):
     path, whose buy_date is the ORIGINAL recommendation date and so would fall
     outside a today-only window. retry_days extends how far back a requeued
     row stays eligible; buy_attempts caps how many times it is re-placed.
+
+    resolved_at is checked alongside buy_date so a NEEDS_REVIEW tip a human
+    resolved days after it was recommended rejoins the queue. Without it such
+    a trade returns to PENDING_BUY already outside the buy_date window and is
+    never picked up — and because it still reads as queued, nothing surfaces
+    that it will never be bought.
     """
     conn = get_oracle_connection()
     if not conn:
@@ -253,7 +259,8 @@ def get_pending_buy_trades(scan_dates=None, retry_days=0):
                    buy_date, NVL(buy_attempts, 0) AS buy_attempts
             FROM trades
             WHERE status = 'PENDING_BUY'
-              AND buy_date >= TRUNC(SYSDATE) - :lookback
+              AND (buy_date >= TRUNC(SYSDATE) - :lookback
+                   OR resolved_at >= TRUNC(SYSDATE) - :lookback)
             ORDER BY buy_date, trade_id
         """, {'lookback': max(0, int(retry_days)) + 1})
         cols = [d[0].lower() for d in cursor.description]
@@ -533,6 +540,36 @@ def get_latest_conviction(trade_id):
     except Exception as e:
         log(f"  get_latest_conviction error: {e}")
         return None
+
+
+def open_qty_for_symbol(symbol, exclude_trade_id=None):
+    """Shares of `symbol` the ledger already claims as held, ignoring one trade.
+
+    Used to work out how much of a Kite holding is NOT explained by existing
+    open lots, which is the only sound basis for inferring that a particular
+    unconfirmed order filled. See order_status.get_order_status — attributing
+    a whole holding to one order is how trade #543 came to record 8 BSE shares
+    that belonged to eight other trades.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT NVL(SUM(NVL(my_buy_qty, 0)), 0)
+            FROM trades
+            WHERE symbol = :sym AND status = 'Open'
+              AND (:tid IS NULL OR trade_id <> :tid)
+        """, {'sym': (symbol or '').upper(), 'tid': exclude_trade_id})
+        n = int(cur.fetchone()[0] or 0)
+        cur.close()
+        return n
+    except Exception as e:
+        log(f"  open_qty_for_symbol error for {symbol}: {e}")
+        return None
+    finally:
+        conn.close()
 
 
 def get_pending_fill_trades():

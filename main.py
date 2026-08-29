@@ -17,11 +17,12 @@ from lib.config import (log, DRY_RUN, IST, INVEST_AMT, CONVICTION_SIZING,
                         CONVICTION_SIZING_ENABLED, CONVICTION_MIN_SCORE,
                         REQUIRE_HAVE_INTEREST, BUY_RETRY_DAYS, RETRY_ON_UNKNOWN)
 from lib.kite_client import get_enctoken, resolve_kite_symbol, get_market_price, kite_buy
-from lib.order_status import get_order_status
+from lib.order_status import get_order_status, get_holding_qty
 from lib.budget_manager import (
     get_stock_cap_type, check_budget_available, get_pending_buy_trades,
     get_needs_review_trades_for_retry, update_trade_after_buy_attempt, close_oracle_connection,
     get_latest_conviction, get_pending_fill_trades, requeue_for_retry, record_buy_attempt,
+    open_qty_for_symbol,
 )
 from lib.sheet_logger import log_to_sheet
 
@@ -29,9 +30,11 @@ from lib.sheet_logger import log_to_sheet
 def decide_position_size(trade):
     """Apply the buy gates. Returns (invest_amt, reason, retryable).
 
-    Conviction sizing/gating is currently OFF: every accepted buy gets the
-    flat INVEST_AMT. The SPTulsian "Have Interest" gate is unaffected — that
-    is the advisory's own disclosure, not our score.
+    Conviction sizing is ON (lib/bands.py): >85 -> Rs 25,000, 63-85 ->
+    Rs 10,000, below 63 not bought. Set CONVICTION_SIZING_ENABLED False and
+    every accepted buy reverts to the flat INVEST_AMT. The SPTulsian "Have
+    Interest" gate is independent of both — that is the advisory's own
+    disclosure, not our score.
 
     `retryable` is True when the skip reflects OUR pipeline having no data
     rather than a judgement on the call — a blank have_interest (the scrape
@@ -224,7 +227,19 @@ def reconcile_pending_fills(enctoken):
         trade_id = t['trade_id']
         stock, symbol = t['stock_name'], t['symbol']
         attempts = int(t.get('buy_attempts') or 0)
-        info = get_order_status(t['buy_order_id'], enctoken, symbol_hint=symbol)
+        # How many held shares are not already spoken for by other open lots.
+        # Holdings are per symbol, orders are per lot, so this is what lets
+        # the holdings fallback tell this order's fill from someone else's.
+        # None means we could not find out, and the fallback then declines to
+        # infer anything rather than assuming the whole holding is ours.
+        held_by_others = open_qty_for_symbol(symbol, exclude_trade_id=trade_id)
+        from_kite = get_holding_qty(symbol, enctoken) if held_by_others is not None else None
+        unexplained = (None if (held_by_others is None or from_kite is None)
+                       else max(0, from_kite - held_by_others))
+
+        info = get_order_status(t['buy_order_id'], enctoken, symbol_hint=symbol,
+                                expected_qty=t.get('my_buy_qty'),
+                                unexplained_qty=unexplained)
         status = (info or {}).get('status', 'UNKNOWN')
         filled_qty = (info or {}).get('filled_qty') or 0
 
