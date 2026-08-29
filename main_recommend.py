@@ -30,6 +30,12 @@ def process_tip(tip, enctoken):
     tip['target']        = spt['target']
     tip['timeframe']     = spt['timeframe']
     tip['have_interest'] = spt['have_interest']
+    # Advisory context, stored with the trade. Not used by any gate — captured
+    # because the portal only shows what is live, so a field not recorded on
+    # the day of the call is gone.
+    for k in ('spt_market_price_at_call', 'spt_below_reco',
+              'spt_direction', 'spt_rationale'):
+        tip[k] = spt.get(k)
 
     kite_symbol, symbol_status = resolve_kite_symbol(tip['stock'], enctoken)
     tip['kite_symbol'] = kite_symbol or ''

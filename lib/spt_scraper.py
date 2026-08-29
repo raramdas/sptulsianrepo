@@ -169,7 +169,9 @@ def scrape_spt_stock(stock_name, category, log=_clog):
     still made loud — it is logged, and the liveness watermark is NOT written,
     which is what spt_watchdog.py alerts on. Never returns a stale-but-
     plausible-looking result on failure."""
-    blank = {'type': '', 'target': '', 'timeframe': '', 'have_interest': ''}
+    blank = {'type': '', 'target': '', 'timeframe': '', 'have_interest': '',
+             'spt_market_price_at_call': None, 'spt_below_reco': None,
+             'spt_direction': '', 'spt_rationale': ''}
 
     if not refresh_spt_data(log=log):
         return blank
@@ -189,6 +191,12 @@ def scrape_spt_stock(stock_name, category, log=_clog):
         'target': row.get('target_price') or '',
         'timeframe': row.get('timeframe') or '',
         'have_interest': 'Have Interest' if row.get('have_interest') else 'No Interest',
+        # Advisory context recorded alongside the target. Nothing scores on
+        # these; they exist because scraped history cannot be backfilled.
+        'spt_market_price_at_call': row.get('market_price_at_call'),
+        'spt_below_reco': row.get('below_reco_flag'),
+        'spt_direction': row.get('direction') or '',
+        'spt_rationale': row.get('rationale') or '',
     }
 
 
@@ -337,12 +345,36 @@ def _category_slug(category_url):
 
 
 def _row(stock_name, target_price, timeframe, have_interest, source,
-         call_id=None, call_datetime='', buy_price=None, exit_remarks=''):
+         call_id=None, call_datetime='', buy_price=None, exit_remarks='',
+         market_price_at_call=None, below_reco_flag=None, direction='',
+         rationale=''):
     """One normalised call row — the single shape both strategies emit.
 
     'closed' is what callers should gate on, not 'source': a row is only
     treated as closed when SPTulsian left an exit remark on it. Sitting in
-    the archive list is not enough (see _EXIT_RE)."""
+    the archive list is not enough (see _EXIT_RE).
+
+    The last four fields were being received and thrown away:
+
+      market_price_at_call  what the stock traded at when the call was made,
+                            as distinct from buy_price, the price they told
+                            you to pay. The gap between the two is the
+                            advisory's own margin of safety and it varies —
+                            BHEL was called at 434 into a 430.5 market, TD
+                            Power at 741 into 752.7.
+      below_reco_flag       a flag SPTulsian computes themselves.
+      direction             'Buy' on everything seen so far, but a 'Sell'
+                            would matter enormously and would currently be
+                            parsed as a buy.
+      rationale             their written reasoning. Plain text only for the
+                            Medium Term section; Little Gems and Big Gems
+                            ship it as a base64 PNG, so it is empty for the
+                            sections covering almost every trade.
+
+    They are captured now rather than when a use appears, because scraped
+    history cannot be backfilled — the portal only shows what is live today.
+    Nothing scores on them yet.
+    """
     return {
         'stock_name': stock_name,
         'target_price': target_price,
@@ -354,6 +386,10 @@ def _row(stock_name, target_price, timeframe, have_interest, source,
         'call_datetime': call_datetime,
         'buy_price': buy_price,
         'exit_remarks': exit_remarks,
+        'market_price_at_call': market_price_at_call,
+        'below_reco_flag': below_reco_flag,
+        'direction': direction,
+        'rationale': rationale,
     }
 
 
@@ -391,6 +427,14 @@ def _parse_json_rows(data, source_key, source):
             # confuse the two, both end in 'entry_price'.
             buy_price=_clean_float(raw.get(f'{pfx}entry_price')),
             exit_remarks=(raw.get(f'{pfx}remarks') or '').strip(),
+            market_price_at_call=_clean_float(raw.get(f'{pfx}stock_entry_price')),
+            below_reco_flag=raw.get(f'{pfx}price_below_reco_price'),
+            direction=(raw.get(f'{pfx}buy_sell') or '').strip(),
+            # '{pfx}description' is a base64 PNG in these sections, not text —
+            # ~110-160KB per call. Deliberately not carried: storing an image
+            # under a field named 'rationale' would be worse than storing
+            # nothing, because it reads as text everywhere downstream.
+            rationale='',
         ))
     return rows
 
@@ -431,8 +475,40 @@ def _parse_html_table(table, source):
             call_datetime=((bm.group(2) or '').strip() if bm else ''),
             buy_price=(_clean_float(bm.group(1)) if bm else None),
             exit_remarks=exit_remarks,
+            # These sections DO carry the reasoning as plain text — it is the
+            # long free-text cell, distinguishable from the short structured
+            # ones (name, prices, disclosure) by length alone. Deliberately
+            # loose: it is captured for later analysis, not parsed, so a
+            # missed or over-long capture costs nothing today.
+            rationale=_html_rationale(cells),
         ))
     return rows
+
+
+_RATIONALE_MIN_CHARS = 60
+_RATIONALE_SKIP = re.compile(r'^(buy|sell|target|have interest|no interest|read more)\b', re.I)
+
+
+def _html_rationale(cells):
+    """Longest free-text cell in a row, if it looks like prose.
+
+    Medium Term Investments renders the analyst's reasoning as a normal cell.
+    Short Term and Multibagger have no such cell, and Little/Big Gems serve it
+    as an image, so this returns '' far more often than not — that is expected,
+    not a parse failure."""
+    best = ''
+    for td in cells:
+        t = re.sub(r'\s+', ' ', td.get_text(' ', strip=True))
+        t = re.sub(r'\s*Read More\s*$', '', t, flags=re.I).strip()
+        if len(t) < _RATIONALE_MIN_CHARS or _RATIONALE_SKIP.match(t):
+            continue
+        # Structured cells are mostly digits and punctuation; prose is not.
+        letters = sum(c.isalpha() or c.isspace() for c in t)
+        if letters / len(t) < 0.75:
+            continue
+        if len(t) > len(best):
+            best = t
+    return best[:2000]
 
 
 def _parse_html_rows(html):

@@ -198,12 +198,14 @@ def insert_trade_to_oracle(tip, category_id):
                 category_id, category_name, stock_name, symbol, stock_type,
                 buy_date, recommended_price, target_price, timeframe, have_interest,
                 status, my_buy_date, order_type, buy_order_id, market_price_at_buy,
-                my_buy_price, my_buy_qty, invested_amount, notes
+                my_buy_price, my_buy_qty, invested_amount, notes,
+                spt_market_price_at_call, spt_below_reco, spt_direction, spt_rationale
             ) VALUES (
                 :category_id, :category_name, :stock_name, :symbol, :stock_type,
                 :buy_date, :recommended_price, :target_price, :timeframe, :have_interest,
                 :status, :my_buy_date, :order_type, :buy_order_id, :market_price_at_buy,
-                :my_buy_price, :my_buy_qty, :invested_amount, :notes
+                :my_buy_price, :my_buy_qty, :invested_amount, :notes,
+                :spt_market_price_at_call, :spt_below_reco, :spt_direction, :spt_rationale
             )
         """, {
             'category_id': category_id,
@@ -216,6 +218,11 @@ def insert_trade_to_oracle(tip, category_id):
             'target_price': tip.get('target') or None,
             'timeframe': tip.get('timeframe', ''),
             'have_interest': tip.get('have_interest', ''),
+            # Advisory context as it stood at the call. Recorded, not scored.
+            'spt_market_price_at_call': tip.get('spt_market_price_at_call'),
+            'spt_below_reco': tip.get('spt_below_reco'),
+            'spt_direction': (tip.get('spt_direction') or '')[:16],
+            'spt_rationale': (tip.get('spt_rationale') or '')[:2000] or None,
             'status': tip.get('buy_status') if tip.get('buy_status') in ('ERROR', 'SKIPPED', 'NEEDS_REVIEW', 'PENDING_BUY') else 'Open',
             'my_buy_date': today,
             'order_type': tip.get('order_type', ''),

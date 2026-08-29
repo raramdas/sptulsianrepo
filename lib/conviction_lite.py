@@ -50,7 +50,14 @@ warnings.filterwarnings('ignore')
 MODEL = 'lite'
 
 # Component budgets — must total 100.
-BUDGETS = {'momentum': 35, 'trend': 25, 'upside': 25, 'liquidity': 15}
+#
+# 'upside' was replaced by 'reachability' on 2026-08-29. Upside scored the gap
+# to the advisory target across a 0-30% range, but SPTulsian sets targets at a
+# near-constant ~6% above their recommended price — across 16 closed trades the
+# gap ran 5.82% to 7.69%, sd 0.58pp. Twenty-five points were therefore assigned
+# almost the same value for every stock, which cannot rank anything. It was a
+# quarter of a score that was sizing real positions.
+BUDGETS = {'reachability': 40, 'momentum': 25, 'trend': 20, 'liquidity': 15}
 
 TIERS = [
     (80, 'T1', 'Strong'),
@@ -64,8 +71,19 @@ LIQUIDITY_FLOOR_CR = 0.5     # median daily traded value, crore — hard gate
 
 # Scaling endpoints: (0 points, full points)
 MOMENTUM_RANGE = (-0.10, 0.40)   # 12-1 return
-UPSIDE_RANGE = (0.0, 0.30)       # headroom to advisory target
 LIQUIDITY_RANGE = (0.5, 10.0)    # crore/day
+
+# Reachability: how many 3-month sigmas of movement the target requires.
+#     z = gap_to_target / (daily_vol * sqrt(HORIZON_DAYS))
+# LOWER is better, so these endpoints are inverted relative to the others:
+# full points at or below Z_FULL, zero at or above Z_ZERO. Both are the p10
+# and p90 of z measured across the 33 distinct symbols recommended since the
+# account cutover, so the middle 80% of names spread across the full range
+# instead of bunching at one end.
+HORIZON_DAYS = 63                # ~3 months of trading, SPTulsian's stated horizon
+Z_FULL = 0.25
+Z_ZERO = 1.20
+VOL_LOOKBACK = 60                # sessions of realised daily volatility
 
 MIN_BARS = 147               # ~7 months; below this momentum is not computable
 
@@ -161,16 +179,58 @@ def score_trend(close):
                    f'price {price:,.0f} / 50DMA {ma50:,.0f} / 200DMA {ma200:,.0f}{note}')]
 
 
-def score_upside(price, spt_target):
-    """Headroom to the advisory's own target. Absent when no target has been
-    scraped yet, in which case the component drops out and the remaining 75
-    points renormalise — a missing target must not read as no upside."""
-    budget = BUDGETS['upside']
+def reach_z(price, spt_target, daily_vol):
+    """Sigmas of 3-month movement needed to touch the target. None if unknowable."""
+    if not spt_target or spt_target <= 0 or price <= 0 or not daily_vol or daily_vol <= 0:
+        return None
+    gap = (spt_target - price) / price
+    return gap / (daily_vol * (HORIZON_DAYS ** 0.5))
+
+
+def score_reachability(close, price, spt_target):
+    """How likely is this to TOUCH the target inside the horizon?
+
+    This is the question the system actually asks, because the exit is a GTT
+    that fires on touch — not a view held to a valuation. Distance alone does
+    not answer it: SPTulsian's targets sit at a near-constant ~6%, so the gap
+    barely varies, and what separates a name that hits in 3 days from one that
+    takes 23 is how far it moves per day.
+
+    Measured on 16 closed trades, the volatility-scaled distance ranked
+    time-to-target at rho +0.57 (t=+2.6) against +0.36 for the raw gap.
+
+    Two caveats that belong next to the number, not in a commit message.
+    Those 16 trades are all winners — the ones that reached target — so the
+    relationship is conditioned on success and cannot see what volatility
+    costs on the trades that do not. And with no stop-loss in the system, a
+    volatile name that goes the wrong way is not stopped out, it is simply
+    held. Rewarding reachability therefore raises hit rate and thickens the
+    tail at the same time. That trade-off was made deliberately.
+    """
+    budget = BUDGETS['reachability']
     if not spt_target or spt_target <= 0:
-        return [_unknown('Upside to target', 'no advisory target on file', budget)]
-    upside = (spt_target - price) / price
-    return [_check('Upside to target', _scaled(upside, *UPSIDE_RANGE, budget), budget, OK,
-                   f'{upside:+.1%} to target {spt_target:,.0f} from {price:,.0f}')]
+        return [_unknown('Reachability', 'no advisory target on file', budget)]
+
+    rets = close.pct_change().dropna().tail(VOL_LOOKBACK)
+    if len(rets) < 30:
+        return [_unknown('Reachability', f'only {len(rets)} returns (need >=30)', budget)]
+    vol = float(rets.std())
+    if vol <= 0:
+        return [_unknown('Reachability', 'zero realised volatility', budget)]
+
+    gap = (spt_target - price) / price
+    if gap <= 0:
+        # Already at or through the target. Mechanically the GTT fires at once,
+        # but that is not a trade worth taking — entering above the exit books
+        # a loss after costs. Score it zero rather than "maximally reachable".
+        return [_check('Reachability', 0.0, budget, OK,
+                       f'price {price:,.0f} already at/above target {spt_target:,.0f} '
+                       f'({gap:+.1%}) — no room left')]
+
+    z = gap / (vol * (HORIZON_DAYS ** 0.5))
+    return [_check('Reachability', _scaled(z, Z_ZERO, Z_FULL, budget), budget, OK,
+                   f'{gap:+.1%} to target needs {z:.2f} sigma over {HORIZON_DAYS}d '
+                   f'(daily vol {vol:.2%})')]
 
 
 def score_liquidity(close, vol):
@@ -223,7 +283,14 @@ def flags(close, vol, spt_target):
     if len(rets) >= 30:
         ann_vol = float(rets.std()) * (252 ** 0.5)
         if ann_vol > 0.60:
-            out.append(f'High volatility — {ann_vol:.0%} annualised over 60d.')
+            # Stated, not judged. Volatility is what carries price to the
+            # target, so the Reachability component rewards it; flagging it
+            # here as a negative would contradict the score on the same page.
+            # It is still worth seeing, because the same property makes a
+            # position that goes wrong go wrong faster — and with no
+            # stop-loss, nothing intervenes.
+            out.append(f'Volatile — {ann_vol:.0%} annualised. Reaches target sooner; '
+                       f'also moves against you faster, and there is no stop-loss.')
 
     tv_cr = float((close * vol).tail(20).median()) / 1e7
     if tv_cr == tv_cr and tv_cr < LIQUIDITY_FLOOR_CR:
@@ -269,9 +336,18 @@ def score_symbol(symbol, spt_target=None, log=_log):
     components = {
         'momentum': score_momentum(close),
         'trend': score_trend(close),
-        'upside': score_upside(price, spt_target),
+        'reachability': score_reachability(close, price, spt_target),
         'liquidity': score_liquidity(close, vol),
     }
+
+    # Recorded alongside the score, not just folded into it. z is the quantity
+    # we want to validate against realised time-to-target once enough of the
+    # book resolves, and reconstructing it later from a stored composite is
+    # impossible. Storing it now is the difference between measuring this
+    # model in six weeks and re-deriving it from scratch.
+    _rets = close.pct_change().dropna().tail(VOL_LOOKBACK)
+    _vol = float(_rets.std()) if len(_rets) >= 30 else None
+    z_at_score = reach_z(price, spt_target, _vol)
 
     # A component that could not be computed leaves the denominator rather
     # than scoring zero, so missing data reduces confidence instead of
@@ -326,6 +402,7 @@ def score_symbol(symbol, spt_target=None, log=_log):
         'tier': tier, 'tier_label': tier_label, 'verdict': verdict,
         'reasons': reasons, 'gates': hard, 'warnings': warns,
         'is_financial': False, 'sector': None,
+        'reach_z': z_at_score,
         'layers': summary, 'errors': errors,
     }
 

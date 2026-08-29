@@ -28,13 +28,24 @@ keeps working everywhere it is already used.
 CONVICTION_SIZING_ENABLED = True
 
 CONVICTION_SIZING = [
-    (85, 25000),   # score > 85        -> Rs 25,000
-    (63, 10000),   # 63 <= score <= 85 -> Rs 10,000
+    (92, 25000),   # score > 92        -> Rs 25,000
+    (69, 10000),   # 69 <= score <= 92 -> Rs 10,000
 ]
 
 # Pinned to the lower band, and kept at or above conviction_lite.ACCEPT_FLOOR
 # so sizing never funds a name the engine's own verdict rejects.
-CONVICTION_MIN_SCORE = 63
+CONVICTION_MIN_SCORE = 69
+
+# Recalibrated 2026-08-29 from 85/63, when conviction_lite replaced its
+# 'upside' component with 'reachability'. Changing a component changes the
+# score distribution, and the old cutoffs would have kept their numbers while
+# silently becoming a different policy — 21% of names in the Rs 25,000 band
+# against the 7% intended. Achieved at 92/69: 7.0% / 37.2% / 55.8% against an
+# intent of 7.2% / 36.6% / 56.2%.
+#
+# Re-run tools/recalibrate_bands.py after ANY change to the engine's
+# components or weights. This is the third time these thresholds have needed
+# it; treat them as derived, never as constants.
 
 # Fallback banding for display when sizing is disabled, or when a score came
 # from a different engine: the engine's own tiers, which are what a score

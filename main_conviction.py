@@ -88,7 +88,15 @@ def has_model_column(conn):
     return cur.fetchone()[0] > 0
 
 
-def save_score(conn, trade, result, with_model=True):
+def has_column(conn, name):
+    cur = conn.cursor()
+    cur.execute("""SELECT COUNT(*) FROM user_tab_columns
+                   WHERE table_name = 'CONVICTION_SCORES' AND column_name = :c""",
+                {'c': name.upper()})
+    return cur.fetchone()[0] > 0
+
+
+def save_score(conn, trade, result, with_model=True, with_z=True):
     cur = conn.cursor()
     cols = ("trade_id, symbol, stock_name, category_name, score, evidence_pct, "
             "tier, verdict, sector, reasons, warnings, layers_json")
@@ -97,6 +105,9 @@ def save_score(conn, trade, result, with_model=True):
     if with_model:
         cols += ", model"
         vals += ", :model"
+    if with_z:
+        cols += ", reach_z"
+        vals += ", :reach_z"
     cur.execute(f"INSERT INTO conviction_scores ({cols}) VALUES ({vals})", {
         'trade_id': int(trade['trade_id']),
         'symbol': trade['symbol'],
@@ -113,6 +124,7 @@ def save_score(conn, trade, result, with_model=True):
         # what it is rather than asking the reader to trust a number.
         'layers_json': json.dumps(result['layers'], default=str),
         **({'model': result.get('model', 'full')} if with_model else {}),
+        **({'reach_z': result.get('reach_z')} if with_z else {}),
     })
 
 
@@ -131,9 +143,13 @@ def run(all_open=False, engine='lite', dry_run=False):
     log(f"Scoring {len(df)} trade(s)...")
     conn = None if dry_run else db.get_connection()
     with_model = has_model_column(conn) if conn is not None else False
+    with_z = has_column(conn, 'reach_z') if conn is not None else False
     if conn is not None and not with_model:
         log("  NOTE: conviction_scores has no `model` column — storing without it. "
             "Apply the migration so lite and full scores stay distinguishable.")
+    if conn is not None and not with_z:
+        log("  NOTE: conviction_scores has no `reach_z` column — storing without it. "
+            "Apply migrations/004 so the first-passage score can be validated later.")
     scored = failed = 0
     try:
         for _, t in df.iterrows():
@@ -147,7 +163,7 @@ def run(all_open=False, engine='lite', dry_run=False):
             try:
                 result = mod.score_symbol(sym, spt_target=target, log=log)
                 if conn is not None:
-                    save_score(conn, t, result, with_model=with_model)
+                    save_score(conn, t, result, with_model=with_model, with_z=with_z)
                 scored += 1
                 score_s = 'n/a' if result['score'] is None else f"{result['score']:.0f}"
                 log(f"  #{int(t['trade_id'])} {sym:14s} score={score_s:>4s} "
