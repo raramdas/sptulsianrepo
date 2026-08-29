@@ -7,6 +7,10 @@ Kite, with budget-aware position sizing and a full ledger of what it did.
 and technical design, failure handling, and the reasoning behind the
 non-obvious parts. Read that before changing anything load-bearing.
 
+This README is also available as a [PDF](README.pdf). Both are committed
+artefacts — regenerate them with `python3 tools/md2pdf.py --all` after editing
+either source, or they go stale silently.
+
 ---
 
 ## How it runs
@@ -78,7 +82,7 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 │   └── theme.py           #   CSS design system
 │
 ├── migrations/            # numbered, idempotent Oracle DDL
-├── tools/                 # recalibrate_bands.py, dryrun_sizing.py
+├── tools/                 # recalibrate_bands.py, dryrun_sizing.py, md2pdf.py
 ├── archive/               # superseded / one-off — see archive/README.md
 ├── bot/                   # multi-tenant variant — NOT scheduled
 ├── provisioning/          # tenant onboarding for the bot/ tree
