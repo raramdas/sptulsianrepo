@@ -2,7 +2,7 @@
 
 **A single-user automated equity trading system for acting on SPTulsian advisory calls.**
 
-Version as of 2026-08-16 · Ubuntu 22.04 on OCI · Python 3.10 · Oracle Autonomous Database
+Version as of 2026-08-29 · Ubuntu 22.04 on OCI · Python 3.10 · Oracle Autonomous Database
 
 ---
 
@@ -20,7 +20,10 @@ It is deliberately **not** a trading strategy. It does not decide *what* to buy;
 SPTulsian does. The system decides *how much*, subject to a written budget
 policy, executes reliably, and reports honestly on the outcome. A separate
 conviction layer assesses how well each recommendation is supported by public
-evidence, but that layer is advisory only and cannot affect an order.
+evidence, and since 2026-08-26 that layer **does** set position size and can
+refuse a buy outright (§2.2). It remains unvalidated — no backtest has yet
+shown it predicts returns — so its influence is deliberately confined to *how
+much*, never *what*.
 
 ### Design priorities, in order
 
@@ -48,7 +51,9 @@ why a scraper outage raises an alarm rather than simply producing no targets.
                           90-minute review window
                                     |
  10:15 IST   CONVICTION   Score each new recommendation on public evidence.
-                          Display only — cannot block or size a buy.
+                          Sets the ticket size, and can refuse a buy.
+                          A failure here therefore HOLDS buying — which is
+                          why the watchdog checks for unscored trades.
                                     |
  10:45 IST   WATCHDOG     Confirm the scraper actually ran. Email if not.
                                     |
@@ -90,29 +95,43 @@ actually at risk rather than cumulative spend.
 
 | Lite score | Position |
 |---|---|
-| > 85 | ₹25,000 |
-| 63 – 85 | ₹10,000 |
-| < 63 | not bought |
+| > 92 | ₹25,000 |
+| 69 – 92 | ₹10,000 |
+| < 69 | not bought |
 
-The thresholds are **percentile-matched to the lite engine's distribution**,
+The thresholds are **percentile-matched to the engine that produces them**,
 and that is the load-bearing detail. A cutoff like "75" is a statement about a
-score distribution, not about a company. The full engine compressed everything
-into 50–87; the lite engine spreads across 6–100. Carrying "85/75" across
-unchanged would have kept the numbers and silently replaced the policy — the
-₹10,000 band would have fallen from 36.6% of names to 13.9%. So the cutoffs
-were re-derived from the share of names each band was meant to capture:
+score distribution, not about a company. Move it to a differently-shaped
+distribution and the number survives while the policy silently changes.
 
-| Band | Intended | Achieved at 85/63 |
+This has now bitten three times, in both directions:
+
+| Date | Change | If cutoffs had been carried over unchanged |
 |---|---|---|
-| ₹25,000 | 7.2% | 9.3% |
-| ₹10,000 | 36.6% | 34.9% |
+| 2026-08-26 | full engine → lite | ₹10,000 band would fall from 36.6% of names to 13.9% |
+| 2026-08-26 | sizing re-enabled | — recalibrated 85/75 → **85/63** |
+| 2026-08-29 | `upside` → `reachability` | ₹25,000 band would jump from 7% to **21%** |
+
+So the cutoffs are re-derived from the share of names each band was meant to
+capture. At 92/69:
+
+| Band | Intended | Achieved |
+|---|---|---|
+| ₹25,000 | 7.2% | 7.0% |
+| ₹10,000 | 36.6% | 37.2% |
 | not bought | 56.2% | 55.8% |
+
+**Re-run `tools/recalibrate_bands.py` after any change to the engine's
+components or weights.** Treat these numbers as derived, never as constants —
+`tests/test_conviction_sizing.py` asserts the *structure* (two descending
+bands, floor equal to the lower one) rather than the literals, so a
+legitimate recalibration does not read as a test failure.
 
 Two consequences worth holding onto. First, the upper cutoff rests on about
 three names out of 43 and is poorly determined; the lower one sits near the
-median where percentile estimates are stable, so 63 is far more trustworthy
-than 85. Second, this deploys **more** capital than flat sizing — roughly
-₹581k per 100 recommendations against ₹500k — so it is not a risk reduction.
+median where percentile estimates are stable, so 69 is far more trustworthy
+than 92. Second, this deploys **more** capital than flat sizing — roughly
+₹547k per 100 recommendations against ₹500k — so it is not a risk reduction.
 
 `CONVICTION_MIN_SCORE` is pinned to the lower band and kept at or above
 `conviction_lite.ACCEPT_FLOOR`, so sizing can never fund a name the engine's
@@ -127,13 +146,16 @@ argument in §3.5 still stands.
 ```
   advisory email
         │
-        ├────────▶  PENDING_BUY  ───── priced, sized, ordered ─────▶  Open
+        ├────────▶  PENDING_BUY ──── priced, sized, ordered ────▶ PENDING_FILL
         │                                                              │
-        └────────▶  NEEDS_REVIEW                                       │
-                         │                                             │
-                         └──── human fixes symbol ──▶  PENDING_BUY     │
+        ├────────▶  NEEDS_REVIEW                            fill confirmed
+        │                │                                             │
+        │                └── human confirms symbol ─▶ PENDING_BUY      ▼
+        │                                                            Open
+        └────────▶  ADVISORY_SELL   (SPTulsian said Sell —             │
+                                     never bought, alerts a human)     │
                                                                        │
-                    SKIPPED  ◀──── over budget ───────────────────────┤
+                    SKIPPED  ◀──── over budget / gate refused ────────┤
                                                                        │
                     ERROR    ◀──── order rejected / GTT failed ───────┤
                                                                        │
@@ -146,6 +168,19 @@ close), it triggered but the day-validity sell order expired unfilled, or it was
 cancelled. Only the first closes the trade; the other two get a fresh GTT at the
 same target, tagged with a retry counter, so a position is never left silently
 unprotected.
+
+`PENDING_FILL` applies the same rule to the buy side: an order that has been
+placed but not confirmed filled is not an `Open` position. Reconciliation the
+next morning either promotes it with the **actual** filled quantity and average
+price, or requeues it.
+
+**`ADVISORY_SELL` is the one status nothing downstream acts on**, which is
+precisely why it exists. See §4.5.
+
+`NON_BUYING_STATUSES` in `lib/budget_manager.py` lists every status meaning
+"no stock was bought". `insert_trade_to_oracle` whitelists against it and falls
+back to `'Open'`, so a status omitted from that tuple is recorded as a live
+position holding real shares. Add to it before adding a status anywhere else.
 
 ### 2.4 The dashboard
 
@@ -162,10 +197,39 @@ a phone via Add to Home Screen. Login is a password with an encrypted 30-day
 | Trades Explorer | Filterable full trade history, CSV export |
 | Recommendations | Every tip ever seen, bought or not |
 | **Conviction** | Evidence-based score per position, with full working |
-| Needs Review | Fix a bad symbol, preview, then confirm a real buy |
+| Needs Review | Confirm which instrument an ambiguous tip is. **Does not buy** |
 | Open Orders | Live Kite orders and GTTs |
 | Classification | AMFI market-cap lookup |
 | Settings & Edits | Budget, allocations, manual trade close |
+
+**The dashboard cannot place an order.** It reads Kite and writes Oracle;
+no function in `dashboard/` trades.
+
+It used to. Needs Review placed a real buy the moment a human confirmed a
+symbol, sized from a duplicated `INVEST_AMT = 5000` carrying the comment
+*"keep in sync if that ever changes"*. It did not stay in sync — sizing moved
+to conviction bands and that copy kept buying flat — and it bypassed the Have
+Interest gate and conviction entirely.
+
+The error underneath was conflating two questions. *"Which instrument is
+this?"* and *"should we take a position?"* are different, and only the first
+belongs to a human disambiguating a fuzzy ticker. Confirming a symbol now
+validates it against a live quote and returns the trade to `PENDING_BUY`,
+where the normal 11:00 run applies every gate.
+
+That change exposed a trap: `get_pending_buy_trades` windows on `buy_date`, so
+a tip resolved more than `retry_days` later would rejoin the queue *already
+outside* the window and never be bought — while still displaying as queued.
+Hence `resolved_at` (`migrations/003`), checked alongside `buy_date`. Stamping
+`buy_date` to today was rejected: it is the date the advisory made the call,
+and the point-in-time backtest slices price history on it.
+
+**Conviction badges are coloured by what a score does, not by a fixed scale.**
+The colour is derived from `lib/bands.py` and gated on the `model` column, so
+a full-engine score is never painted with lite thresholds. Those thresholds
+are percentile statements about one distribution; applying them to another is
+meaningless — banding the full engine's 50–87 range at 92/69 put 69% of the
+ledger in the "₹10,000" colour for a rule that never applied to it.
 
 ---
 
@@ -339,10 +403,10 @@ Below the evidence floor (40 of 100 points) no composite is published at all —
 a delisted symbol scoring "100/100" off one surviving governance check is worse
 than reporting nothing.
 
-**The engine is display-only.** `main_conviction.py` writes to
-`CONVICTION_SCORES` and nothing else. It cannot size a position or stop a buy.
+**The FULL engine is display-only** — `--engine full` is a research tool and
+nothing sizes on it. The lite engine (§3.5) is what sizes positions.
 
-That caution was warranted. Sizing was briefly wired to the score on
+That distinction was earned. Sizing was first wired to the *full* engine on
 2026-08-25 (>85 → ₹25,000, 75–85 → ₹10,000, below 75 not bought) and reverted
 the next day: `backtest_conviction.py`, rebuilding scores point-in-time and
 measuring excess return against NIFTY, found **no detectable relationship** —
@@ -363,9 +427,9 @@ Four components, one network call per symbol, no missing-filing holes:
 
 | Component | Points | Why it is here |
 |---|---|---|
-| Momentum 12-1 | 35 | Most robustly documented equity factor globally and in India; the direction the per-check attribution pointed at |
-| Trend alignment | 25 | The one technical check that correlated positively (rho +0.23) |
-| Upside to advisory target | 25 | Already in the ledger, free, and it is the advisory's own stated edge |
+| **Reachability** | **40** | How likely the target is to be *touched* inside the horizon. This is the question the exit mechanism actually asks |
+| Momentum 12-1 | 25 | Most robustly documented equity factor globally and in India; the direction the per-check attribution pointed at |
+| Trend alignment | 20 | The one technical check that correlated positively (rho +0.23) |
 | Liquidity | 15 | Not alpha — the constraint that decides whether a position can be exited at all |
 
 **Its shape came from decomposing the full engine.** Correlating each
@@ -394,15 +458,68 @@ surfaced on the dashboard and move no number. Liquidity is the sole hard gate,
 because an exit that cannot happen is a different risk in kind.
 
 **Missing data still renormalises.** A recommendation with no scraped target
-yet drops the upside component and scores out of the remaining 75, reported as
-`evidence_pct = 75`. A missing target must not read as "no upside".
+yet drops the reachability component and scores out of the remaining 60,
+reported as `evidence_pct = 60`. A missing target must not read as
+"unreachable".
 
-**This is a hypothesis, not a finding.** The attribution rests on 37 symbols
-over two months in one market regime, and at that size no single check clears
-a sensible noise threshold — the strongest is one of seven tests. The lite
-engine is therefore display-only on exactly the same terms as the full one.
 Scores from the two engines are stored with a `model` column and must never be
-pooled in a backtest.
+pooled in a backtest. The dashboard badge reads that column too — a score from
+one engine is never coloured by the other's thresholds (§2.4).
+
+#### Reachability: why distance alone was measuring nothing
+
+The lite engine originally spent 25 points on "upside to target", scaled
+across a 0–30% range. Then the targets were measured:
+
+| Gap to target, 16 closed trades | |
+|---|---|
+| Range | 5.82% – 7.69% |
+| Standard deviation | **0.58pp** |
+| Median, closed vs still-open | 6.00% vs 6.05% |
+
+**SPTulsian sets targets at a near-constant ~6% above their recommended
+price.** A quarter of a composite that was sizing real money was therefore
+assigning almost the same value to every stock. A term that does not vary
+across candidates cannot rank them — the same defect as scoring NIFTY's trend,
+which is identical for everything scored that morning.
+
+What separates a name that reaches target in 3 days from one that takes 23 is
+not distance but speed. Since the exit is a GTT firing on touch, this is a
+first-passage problem:
+
+```
+z = gap_to_target / (daily_vol × √63)      63 ≈ 3 months of trading
+```
+
+Measured against realised time-to-target on those 16 trades:
+
+| Predictor | Spearman | t |
+|---|---|---|
+| Raw gap % | +0.364 | +1.46 |
+| **gap / (vol × √63)** | **+0.572** | **+2.61** |
+
+Because the gap is nearly constant, that z is essentially `1/volatility`:
+ZEEL at 3.5% daily vol hit target in 3 days; CDSL at 1.76% took 5, 8, 14 and
+23. Scale endpoints (full points at z ≤ 0.25, zero at z ≥ 1.20) are the p10
+and p90 of z across the 33 symbols recommended since the account cutover.
+
+**The volatility flag was reworded, not deleted.** It previously read as a
+risk warning — which now contradicts the score on the same page, since the
+engine rewards the property the flag was penalising. Same inversion as the RSI
+guard, caught before shipping rather than after.
+
+**Two caveats belong next to that +0.572, not in a commit message.** Those 16
+trades are all winners — the ones that reached target — so the relationship is
+conditioned on success and is structurally blind to what volatility costs on
+trades that fail. And with no stop-loss, a volatile name that moves the wrong
+way is not stopped out, merely held. Rewarding reachability raises hit rate
+and thickens the tail simultaneously. That trade-off was made deliberately.
+
+`reach_z` is stored per score (`migrations/004`) so the model can be measured
+against realised time-to-target rather than re-derived later.
+
+**This is still a hypothesis.** Sixteen closed trades, all winners, in a book
+26 days old against a 90-day thesis. Nothing has yet had time to fail.
 
 ### 3.6 Component reference
 
@@ -411,7 +528,7 @@ pooled in a backtest.
 | `main_recommend.py` | **Phase 1** — resolve symbols, scrape targets, no orders |
 | `main.py` | **Phase 2** — price, size, buy |
 | `main_gtt_oracle.py` | **Phase 3** — place GTTs, confirm fills, close trades |
-| `main_conviction.py` | Score today's recommendations (display only) |
+| `main_conviction.py` | Score today's recommendations; the lite score sets position size |
 | `spt_watchdog.py` | Liveness alarm for the scraper |
 | `spt_capture.py` | Manual review-then-save of scraped targets |
 | `lib/config.py` | Env/credentials, `KITE_ACCOUNT` switch (NEW/OLD), logging, IST |
@@ -421,13 +538,17 @@ pooled in a backtest.
 | `lib/budget_manager.py` | Budget policy, all `TRADES` reads/writes |
 | `lib/spt_scraper.py` | Portal login, both parsing strategies, liveness watermark |
 | `lib/conviction.py` | Four-layer fundamentals engine (`--engine full`) |
-| `lib/conviction_lite.py` | Momentum/trend/upside/liquidity engine (default) |
+| `lib/conviction_lite.py` | Reachability/momentum/trend/liquidity engine (default) |
+| `lib/bands.py` | Sizing thresholds and `size_for()` — the single definition both the buy path and the dashboard read |
 | `lib/sheet_logger.py` | Google Sheets mirror (legacy, still written) |
 | `dashboard/app.py` | Streamlit UI, all pages |
 | `dashboard/db.py` | Dashboard's Oracle data access |
-| `dashboard/kite_data.py` | Multi-account Kite sync, retry-buy preview/confirm |
+| `dashboard/kite_data.py` | Multi-account Kite sync, symbol resolution for Needs Review. **Places no orders** |
 | `dashboard/capture_api.py` | Authenticated endpoint for `spt_capture.py` |
 | `dashboard/theme.py` | CSS design system, table and KPI rendering |
+| `tools/recalibrate_bands.py` | Re-derives sizing cutoffs from the current score distribution |
+| `tools/dryrun_sizing.py` | Previews what the buy run would do, with every write tripwired |
+| `backtest_conviction.py` | Point-in-time scoring vs realised excess return |
 | `archive/` | Superseded and one-off scripts; nothing scheduled |
 | `bot/` | Multi-tenant variant; keeps its own module copies, not scheduled |
 
@@ -455,6 +576,25 @@ Oracle Autonomous Database, wallet authentication.
 regardless of outcome, which is what makes the Recommendations page a complete
 record rather than a survivor-biased one.
 
+Schema changes live in `migrations/`, numbered and idempotent (each re-runs
+safely, tolerating `ORA-01430`/`ORA-00955`):
+
+| Migration | Adds | Why |
+|---|---|---|
+| `002` | `conviction_scores.model` | Lite and full scores are not comparable and must never be pooled in a backtest |
+| `003` | `trades.resolved_at` | A tip resolved days after its call must rejoin the buy queue; `buy_date` cannot be moved without falsifying the record |
+| `004` | `conviction_scores.reach_z` | The quantity to validate against realised time-to-target. Kept out of `layers_json` so it can be correlated directly |
+| `005` | `trades.spt_*` | Advisory context at the call — captured because the portal shows only what is live |
+
+The `spt_*` columns record what SPTulsian said, and nothing scores on them yet:
+
+| Column | Content |
+|---|---|
+| `spt_market_price_at_call` | Market price when the call was made, as distinct from `recommended_price` — the gap between them is their own margin of safety, and it varies (BHEL called at 434 into a 430.5 market, TD Power at 741 into 752.7) |
+| `spt_below_reco` | A flag SPTulsian computes themselves |
+| `spt_direction` | `Buy`/`Sell`. Safety-critical — see §4.5 |
+| `spt_rationale` | Their written reasoning. **Plain text only for Medium Term**; Little Gems and Big Gems ship it as a base64 PNG (110–160 KB), so it stays null for the sections covering nearly every trade. No OCR is attempted |
+
 ### 3.8 Schedule
 
 The VM clock is **UTC**; IST is UTC+5:30.
@@ -462,7 +602,7 @@ The VM clock is **UTC**; IST is UTC+5:30.
 | Job | Cron (UTC) | IST | Purpose |
 |---|---|---|---|
 | `main_recommend.py` | `0 4 * * 1-5` | 09:30 | Phase 1 |
-| `main_conviction.py` | `45 4 * * 1-5` | 10:15 | Scoring, lite engine (display only) |
+| `main_conviction.py` | `45 4 * * 1-5` | 10:15 | Scoring, lite engine. A failure holds buying |
 | `spt_watchdog.py` | `15 5 * * 1-5` | 10:45 | Liveness alarm |
 | `main.py` | `30 5 * * 1-5` | 11:00 | Phase 2 |
 | `main_gtt_oracle.py` | `30 10 * * 1-5` | 16:00 | Phase 3 |
@@ -504,6 +644,9 @@ indistinguishable from an outage and would cry wolf every time.
 | HTTP 403, CloudFront headers | Egress blocked or proxy bypassed | Compare direct vs proxied `ifconfig.me` |
 | HTTP 500 from a section endpoint | Wrong controller for that section | Endpoint is read per page — confirm the page still declares it |
 | Pages fetch, zero rows | Portal markup changed | `python3 spt_capture.py --dry-run` |
+| A trade shows `Open` with shares you do not hold | Holdings attributed to the wrong lot | Compare ledger `SUM(my_buy_qty)` per symbol against Kite; see §4.5 |
+| A resolved Needs Review tip never gets bought | Outside the `buy_date` window | Check `resolved_at` is populated (migration 003) |
+| Score changed sharply with no market move | Engine components changed without recalibration | `python3 tools/recalibrate_bands.py` |
 | Login "succeeds", no data | Credentials changed | Substance check should catch it; verify `SPT_USERNAME`/`SPT_PASSWORD` |
 | TCP connects but **nothing responds** on :22 and :443 | Global OOM — userspace wedged, kernel still answering | OCI console → force reboot, then `journalctl -b -1 \| grep -i oom` |
 | `warp-svc` restarting repeatedly | Memory leak hitting its cgroup cap | `systemctl show warp-svc -p MemoryCurrent`; this is the cap working |
@@ -520,9 +663,20 @@ These hold by construction and should be preserved by any future change:
 4. Conviction sizing is on, and its thresholds are **percentile-matched to
    the engine that produces them**. Cutoffs are statements about a score
    distribution, not about the world; moving them between engines unchanged
-   silently changes the policy. See §2.2 and `lib/config.py`.
-5. Manual buy paths (Needs Review, `spt_capture`) always preview before they
-   commit, and the confirm step is the only thing that spends money.
+   silently changes the policy. See §2.2 and `lib/bands.py`.
+5. **The dashboard never places an order.** Every buy goes through `main.py`,
+   so there is exactly one code path that spends money and exactly one place
+   the gates can be applied.
+6. **A quantity is never claimed from a symbol-level lookup.** Holdings and
+   order lists are per symbol; positions are per lot. Anything inferring "this
+   order filled" from a holding must first subtract what other open lots
+   already claim. See §4.5.
+7. **An explicit SELL is never bought**, from either the email or the portal,
+   and always reaches a human.
+8. Thresholds, budgets and status lists are defined **once**. `lib/bands.py`
+   holds the sizing cutoffs; `NON_BUYING_STATUSES` holds the statuses that
+   mean no stock was bought. Every duplicated constant in this system has
+   eventually drifted.
 
 ### 4.4 Resource containment
 
@@ -554,6 +708,51 @@ The proxy is needed for about a minute a day, so a restart is invisible to the
 workload. If `warp-svc` ever begins restarting frequently, that is the cap
 doing its job — the leak is upstream in Cloudflare's daemon, not in this
 system.
+
+### 4.5 Two failures worth naming
+
+**Attributing a symbol's holding to one order.** When an order appears in
+neither today's list nor order history, `get_order_status` can infer a
+previous-day fill from holdings. It used to return the *entire* holding as
+that order's filled quantity, which is only correct when the symbol is held in
+one lot.
+
+On 2026-08-28 that marked a 3-share BSE order COMPLETE for 8 shares. All eight
+belonged to eight earlier one-share trades; Kite held exactly 8; the ledger
+then claimed 16. The order had not filled at all, and ₹26,608 of stock that
+was never bought sat in the ledger inflating deployed capital.
+
+The fallback now requires the caller to supply how many shares are **not**
+already claimed by other open lots, caps the claim at what the order
+requested, and returns `NOT_FILLED` when the holding is fully explained —
+a positive statement rather than an absence of information. Without that
+context it declines to infer.
+
+This is the second instance of one pattern: the IDEA sell-order
+mis-attribution matched on symbol + quantity alone and closed two trades
+against a single fill. Hence invariant 6.
+
+**A SELL call that nobody sees.** The email pattern hardcoded `(Buy @ price)`,
+so `Call added: X (Sell @ N)` did not match. The bot would not have bought it —
+but the tip was dropped at the regex, never logged, never recorded. The failure
+mode was silence: a position held with a GTT resting at a target the advisory
+had just withdrawn, and nothing anywhere saying so.
+
+Direction is now read from the email **and** from SPTulsian's `buy_sell`
+field, and either saying Sell is enough — the email is the only source for
+sections whose portal rows carry no direction, and the portal is the only
+source if an email is missed. The call becomes `ADVISORY_SELL`: never bought,
+inert to every buy query, and surfaced three ways — the recommend log, an
+amber pill on the dashboard, and the watchdog's alert mail, which reports how
+many shares are still held. "They said exit" and "they said exit and you own
+340 shares" need different responses.
+
+A **blank** direction deliberately does not block: most HTML sections carry no
+direction field, so treating blank as a sell would stop nearly every buy. Only
+an explicit Sell blocks.
+
+Nothing in the pipeline can close a position, so a signal only a human can act
+on has to reach a human — that is the whole purpose of this status.
 
 ---
 
@@ -617,6 +816,22 @@ during development. Commands that move money are handed to the operator to run.
   of Little Gems.
 - **Single tenant in practice.** `TENANT_CONFIG` and the `bot/` tree carry
   multi-tenant scaffolding that is not currently scheduled.
+- **There is no stop-loss and no time-based exit.** A position that never
+  reaches its target is simply held. This is deliberate for now, but it means
+  the only way a trade leaves the book is by succeeding — which is why the
+  ledger's win rate is not evidence of anything (§7) and why favouring
+  volatility carries an unmeasured cost.
+- **The advisory's written rationale is unavailable for 96 of 101 positions.**
+  Little Gems and Big Gems serve it as a base64 PNG rather than text. Only the
+  Medium Term section exposes prose. OCR was considered and rejected: two lossy
+  stages before any signal, against a format the publisher appears to have
+  chosen deliberately.
+- **`buy_sell` is only present on the JSON sections.** The HTML sections carry
+  no direction field, so a SELL there is caught by the email pattern alone. If
+  SPTulsian ever issues one without a matching email, it would be missed.
+- **The conviction model cannot yet be validated.** Sixteen closed trades, all
+  winners, in a book four weeks old against a 90-day thesis. `reach_z` is
+  stored so the test becomes possible later; it is not possible now.
 
 ---
 
@@ -625,6 +840,24 @@ during development. Commands that move money are handed to the operator to run.
 The conviction engine computes published metrics from public data and shows its
 working. It is decision support, not financial advice, and not a prediction.
 Every threshold in it is a convention rather than a fact, tuned against one
-portfolio. The judgement stays with the human reading the output — which is
-precisely why the layer is display-only and why every score is shown alongside
-the checks that produced it.
+portfolio and re-derived three times already.
+
+It now sets position size, which raises the stakes on being honest about what
+it is worth. The record: the full engine's composite showed **no detectable
+relationship** with excess return across 37 symbols. The lite engine's
+reachability component correlates with time-to-target at rho +0.57, but on
+16 closed trades that are all winners, in a book four weeks old against a
+90-day thesis. That is a well-motivated hypothesis, not a validated model.
+
+Two structural cautions that no amount of further fitting will remove:
+
+- **The sample only contains successes.** Positions close when they touch
+  target; ones that fail simply stay open. Any model fitted to closed trades
+  is fitted to the easy half of the distribution.
+- **Optimising for speed-to-target favours volatility**, and with no
+  stop-loss the same property makes losing positions worse. Hit rate and tail
+  risk move together here, and only the first is currently measurable.
+
+`reach_z` is stored per score so the honest test becomes possible once enough
+of the book resolves. Until then, every score is shown alongside the checks
+that produced it, and the judgement stays with the human reading the output.

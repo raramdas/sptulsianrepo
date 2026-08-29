@@ -17,7 +17,7 @@ and IST is UTC+5:30.
 | Job | UTC | IST | What it does |
 |---|---|---|---|
 | `main_recommend.py` | `0 4` | 09:30 | Parse the advisory email, resolve symbols, scrape targets. **No orders.** |
-| `main_conviction.py` | `45 4` | 10:15 | Score new recommendations (lite engine). Display only. |
+| `main_conviction.py` | `45 4` | 10:15 | Score new recommendations. **Sets position size** — a failure here holds buying |
 | `spt_watchdog.py` | `15 5` | 10:45 | Alarm if the scraper has gone dark |
 | `main.py` | `30 5` | 11:00 | Price, size against budget, place real buy orders |
 | `main_gtt_oracle.py` | `30 10` | 16:00 | Place GTT sells; close trades on confirmed fills |
@@ -30,12 +30,18 @@ guess.
 Run on demand:
 
 ```bash
-python3 main_conviction.py --dry-run    # score today's, print, write nothing
-python3 main_conviction.py --engine full SYMBOL   # deep dive on one name
-python3 main_conviction.py --all-open   # re-score every open position
-python3 spt_capture.py --dry-run        # preview scraped targets, then save
-python3 spt_watchdog.py --check-only    # health check, never sends mail
+python3 main_conviction.py --dry-run       # score today's, print, write nothing
+python3 main_conviction.py --engine full   # the deeper fundamentals engine
+python3 main_conviction.py --all-open      # re-score every open position
+python3 tools/dryrun_sizing.py             # what the buy run WOULD do; writes nothing
+python3 tools/recalibrate_bands.py         # re-derive sizing cutoffs
+python3 spt_capture.py --dry-run           # preview scraped targets, then save
+python3 spt_watchdog.py --check-only       # health check, never sends mail
 ```
+
+Run `tools/dryrun_sizing.py` before any change that affects money — it mirrors
+the real buy path against live data with every write and order call replaced by
+a tripwire that raises.
 
 ## Layout
 
@@ -49,7 +55,7 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 ├── main.py                # Phase 2: price, size, buy                 ← cron
 ├── main_gtt_oracle.py     # Phase 3: GTT sells, confirm fills, close  ← cron
 ├── spt_watchdog.py        # Liveness alarm for the scraper            ← cron
-├── main_conviction.py     # Evidence scoring (display only)
+├── main_conviction.py     # Evidence scoring; the lite score sets position size
 ├── spt_capture.py         # Manual review-then-save of scraped targets
 │
 ├── lib/                   # shared modules
@@ -60,17 +66,19 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 │   ├── budget_manager.py  #   budget policy; all TRADES reads/writes
 │   ├── spt_scraper.py     #   portal login + two parsing strategies
 │   ├── conviction.py      #   four-layer fundamentals engine (--engine full)
-│   ├── conviction_lite.py #   momentum/trend/upside/liquidity (default)
+│   ├── conviction_lite.py #   reachability/momentum/trend/liquidity (default)
+│   ├── bands.py           #   sizing thresholds — ONE definition, read by bot + UI
 │   └── sheet_logger.py    #   Google Sheets mirror (legacy)
 │
 ├── dashboard/             # Streamlit UI ("Capital Ledger")
 │   ├── app.py             #   pages
 │   ├── db.py              #   Oracle access
-│   ├── kite_data.py       #   multi-account sync, retry-buy
+│   ├── kite_data.py       #   multi-account sync, symbol resolution (places NO orders)
 │   ├── capture_api.py     #   authenticated endpoint for spt_capture.py
 │   └── theme.py           #   CSS design system
 │
 ├── migrations/            # numbered, idempotent Oracle DDL
+├── tools/                 # recalibrate_bands.py, dryrun_sizing.py
 ├── archive/               # superseded / one-off — see archive/README.md
 ├── bot/                   # multi-tenant variant — NOT scheduled
 ├── provisioning/          # tenant onboarding for the bot/ tree
@@ -191,8 +199,17 @@ The invariants below hold by construction. Preserve them.
    no relationship between conviction and excess return. Re-run
    `python3 backtest_conviction.py` on `model='lite'` rows as trades close,
    and set the flag False to return to flat `INVEST_AMT`.
-5. Manual buy paths preview before they commit; the confirm step is the only
-   thing that spends money.
+5. **The dashboard never places an order.** Every buy goes through `main.py`,
+   so there is one code path that spends money and one place to gate it.
+   Needs Review confirms *which instrument* a tip is; it does not buy.
+6. A quantity is never claimed from a symbol-level lookup. Holdings are per
+   symbol, positions are per lot — anything inferring "this order filled" from
+   a holding must subtract what other open lots already claim.
+7. An explicit SELL from SPTulsian is never bought, and always reaches a human
+   (`ADVISORY_SELL` + watchdog mail).
+8. Thresholds and status lists are defined once — `lib/bands.py` for sizing
+   cutoffs, `NON_BUYING_STATUSES` for statuses meaning no stock was bought.
+   Every duplicated constant here has eventually drifted.
 
 Anything touching money or the ledger gets exercised first in an isolated
 directory with Oracle writes, Sheet writes, and order placement monkey-patched
@@ -201,30 +218,53 @@ convention has caught a pooled-budget bug, a GTT close that recorded no sell
 price, and a `DataFrame.__bool__` call that silently nulled every financial
 statement in the conviction engine.
 
+Two recent failures worth knowing before you touch reconciliation or the
+scraper — both documented in [ARCHITECTURE.md §4.5](ARCHITECTURE.md):
+
+- A holdings-based fill inference claimed all 8 BSE shares for a 3-share order
+  that never filled, recording ₹26,608 of stock that was never bought.
+- A SELL call was dropped at a regex that hardcoded `(Buy @ price)` — not
+  bought, but never recorded or surfaced either.
+
 ## Note on the conviction layer
 
-Two engines. `--engine lite` is the default and scores every new
-recommendation on four cheap, always-available inputs — 12-1 momentum (35),
-trend alignment (25), upside to the advisory target (25), liquidity (15).
-One network call per symbol. `--engine full` is the original four-layer
-fundamentals engine, kept for a deep look at a single name.
+Two engines. **`lite` is the default** and sizes real positions. Four cheap,
+always-available components, one network call per symbol:
 
-Their scores are **not comparable** and are stored with a `model` column so
-the track record can separate them. Never pool them in a backtest.
+| Component | Points |
+|---|---|
+| Reachability — `gap / (vol × √63)` | 40 |
+| Momentum 12-1 | 25 |
+| Trend alignment | 20 |
+| Liquidity | 15 |
 
-The lite engine's shape came out of decomposing the full engine's checks
-against realised excess return. Two results drove it: trend alignment
-correlated positively (rho +0.23) while the overbought and 52-week guards
-correlated *negatively* (-0.35, -0.22) — the engine was rewarding and
-penalising the same underlying property at once. So in the lite engine those
-guards are **flags, not points**: "don't chase an extended move" is a risk
-observation, and encoding it as negative score marked down exactly the names
-that outperformed in that window.
+`--engine full` is the original four-layer fundamentals engine, kept for a
+deep look at one name. Nothing sizes on it. Their scores are **not comparable**
+and are stored with a `model` column; never pool them in a backtest, and note
+the dashboard badge reads that column so a full-engine score is never coloured
+by lite thresholds.
 
-That decomposition rests on 37 symbols over two months in one market regime.
-It is a hypothesis about what to measure, not evidence that the new weights
-work. Both engines are display-only for that reason, and the dashboard shows
-every score alongside the checks that produced it.
+**Why reachability replaced "upside to target".** SPTulsian sets targets at a
+near-constant ~6% above their recommended price — across 16 closed trades the
+gap ran 5.82% to 7.69%, sd 0.58pp. Scoring that across a 0–30% range gave every
+stock almost the same value on a quarter of the composite. What actually
+separates a name that reaches target in 3 days from one that takes 23 is
+volatility, not distance: `gap / (vol × √63)` ranked time-to-target at
+rho +0.57 against +0.36 for the raw gap.
+
+**Read the caveats before trusting the number.** Those 16 trades are all
+winners — positions close when they touch target, and ones that fail just stay
+open — so the model is fitted to the easy half of the distribution. And
+optimising for speed-to-target favours volatility, which with no stop-loss
+makes losing positions worse. Hit rate and tail risk move together here, and
+only the first is currently measurable. That trade-off was chosen deliberately.
+
+`reach_z` is stored per score so the honest test — stored z against realised
+time-to-target — becomes possible once enough of the book resolves.
+
+**The thresholds are derived, not constants.** They have been recalibrated
+three times as components changed. Run `tools/recalibrate_bands.py` after any
+change to the engine, or the numbers survive while the policy silently shifts.
 
 It computes published metrics from public data and shows its working. It is
 decision support, not financial advice, and not a prediction — every threshold
