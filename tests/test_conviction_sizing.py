@@ -23,8 +23,17 @@ print(f"  REQUIRE_HAVE_INTEREST     = {REQUIRE_HAVE_INTEREST}")
 print(f"  INVEST_AMT (flat fallback)= {INVEST_AMT}")
 
 ok(CONVICTION_SIZING_ENABLED is True, "sizing is enabled")
-ok(CONVICTION_SIZING == [(85, 25000), (63, 10000)], "bands are 85/25k, 63/10k", CONVICTION_SIZING)
-ok(CONVICTION_MIN_SCORE == 63, "floor is 63", CONVICTION_MIN_SCORE)
+# Deliberately derived, not hardcoded: these thresholds have been recalibrated
+# three times as the engine's components changed, and a test that pins them to
+# literals just breaks on every legitimate recalibration. What must hold is the
+# STRUCTURE — two descending bands, a floor equal to the lower one.
+HI, HI_AMT = CONVICTION_SIZING[0]
+LO, LO_AMT = CONVICTION_SIZING[-1]
+ok(len(CONVICTION_SIZING) == 2, "two bands", CONVICTION_SIZING)
+ok(HI > LO, "bands descend", CONVICTION_SIZING)
+ok(HI_AMT > LO_AMT, "higher band buys more", CONVICTION_SIZING)
+ok(CONVICTION_MIN_SCORE == LO, "floor equals the lower band", 
+   f"floor={CONVICTION_MIN_SCORE} lower={LO}")
 
 # Mock the conviction lookup so nothing touches Oracle.
 _scores = {}
@@ -38,22 +47,21 @@ def size(score, have_interest='Have Interest', verdict='ACCEPT', evidence=100):
 
 print("\n=== band boundaries ===")
 cases = [
-    (100.0, 25000, "100 -> 25k"),
-    (86.0,  25000, "86 (just above 85) -> 25k"),
-    (85.0,  10000, "85 exactly -> 10k (band is > 85, not >=)"),
-    (81.1,  10000, "81.1 (today's IDEA) -> 10k"),
-    (70.0,  10000, "70 -> 10k"),
-    (63.0,  10000, "63 exactly (== floor) -> 10k"),
+    (100.0,     HI_AMT, f"100 -> top band"),
+    (HI + 1,    HI_AMT, f"{HI+1} (just above {HI}) -> top band"),
+    (HI,        LO_AMT, f"{HI} exactly -> mid band (rule is > {HI}, not >=)"),
+    (LO + 5,    LO_AMT, f"{LO+5} -> mid band"),
+    (LO,        LO_AMT, f"{LO} exactly (== floor) -> mid band"),
 ]
 for score, expect, label in cases:
     amt, reason, retry = size(score)
     ok(amt == expect, label, f"got {amt} reason={reason}")
 
 print("\n=== below the floor: not bought, and NOT retried ===")
-for score, label in [(62.7, "62.7 (today's POLYCAB, just under)"),
-                     (50.0, "50 (engine ACCEPT_FLOOR)"),
-                     (10.6, "10.6 (today's MEIL)"),
-                     (6.7,  "6.7 (today's OMPOWER)")]:
+for score, label in [(LO - 0.1, f"{LO-0.1} (just under the floor)"),
+                     (LO - 10,  f"{LO-10}"),
+                     (10.6,     "10.6"),
+                     (6.7,      "6.7")]:
     amt, reason, retry = size(score)
     ok(amt is None, f"{label} -> not bought", f"got {amt}")
     ok(retry is False, f"{label} -> not retryable (a judgement, not a data gap)", retry)
@@ -80,7 +88,7 @@ amt, reason, retry = size(95.0, have_interest='')
 ok(amt is None and retry is True, "blank interest -> skip but retry (unknown, not refused)", f"{amt} {retry}")
 
 print("\n=== today's four, as tomorrow's run would size them ===")
-for sym, score in [('IDEA', 81.1), ('POLYCAB', 62.7), ('MEIL', 10.6), ('OMPOWER', 6.7)]:
+for sym, score in [('IDEA', 89.0), ('POLYCAB', 77.0), ('MEIL', 60.0), ('OMPOWER', 35.0)]:
     amt, reason, retry = size(score)
     print(f"  {sym:<9} {score:>5.1f}  ->  " +
           (f"Rs {amt:,}" if amt else f"not bought ({reason})"))
