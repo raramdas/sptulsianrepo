@@ -738,10 +738,18 @@ but the tip was dropped at the regex, never logged, never recorded. The failure
 mode was silence: a position held with a GTT resting at a target the advisory
 had just withdrawn, and nothing anywhere saying so.
 
-Direction is now read from the email **and** from SPTulsian's `buy_sell`
-field, and either saying Sell is enough — the email is the only source for
-sections whose portal rows carry no direction, and the portal is the only
-source if an email is missed. The call becomes `ADVISORY_SELL`: never bought,
+Direction is now read from the email **and** from every portal section, and
+either saying Sell is enough. The JSON sections expose a `buy_sell` field; the
+HTML sections render the call as `<Direction> @ <price>` in their mobile cell,
+which one pattern reads alongside the price and timestamp. Coverage is 100% of
+live and archived rows across all five sections.
+
+On archived rows the exit remark is skipped when locating the call: a remark
+reading "Exited: Sell @ 1,600" would otherwise be parsed as a sell call at the
+exit price, inventing both a direction and an entry price from the way the
+position was closed. The span is skipped rather than the text truncated,
+because truncating lost the direction on every archived row whose remark
+happened to precede the call text — 23 of 43 in Medium Term. The call becomes `ADVISORY_SELL`: never bought,
 inert to every buy query, and surfaced three ways — the recommend log, an
 amber pill on the dashboard, and the watchdog's alert mail, which reports how
 many shares are still held. "They said exit" and "they said exit and you own
@@ -826,9 +834,6 @@ during development. Commands that move money are handed to the operator to run.
   Medium Term section exposes prose. OCR was considered and rejected: two lossy
   stages before any signal, against a format the publisher appears to have
   chosen deliberately.
-- **`buy_sell` is only present on the JSON sections.** The HTML sections carry
-  no direction field, so a SELL there is caught by the email pattern alone. If
-  SPTulsian ever issues one without a matching email, it would be missed.
 - **The conviction model cannot yet be validated.** Sixteen closed trades, all
   winners, in a book four weeks old against a 90-day thesis. `reach_z` is
   stored so the test becomes possible later; it is not possible now.

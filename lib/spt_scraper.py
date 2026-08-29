@@ -243,7 +243,16 @@ _TOKEN_RE = re.compile(r'name="_token"[^>]*value="([^"]+)"')
 _ACTIVE_EP_RE = re.compile(r'/get([A-Za-z0-9]+?)ActiveData')
 # Content-based field extraction for the HTML-rendered sections.
 _TARGET_RE = re.compile(r'Target:\s*([\d,]+(?:\.\d+)?)\s*(?:\(([^)]*)\))?', re.I)
-_BUY_RE = re.compile(r'Buy\s*@?\s*([\d,]+(?:\.\d+)?)\s*(?:\(([^)]*)\))?', re.I)
+# Direction is captured, not assumed. This pattern hardcoded 'Buy', which meant
+# a SELL row on an HTML section parsed as a buy with no price — and nothing
+# recorded that the advisory had reversed. Every HTML section renders the call
+# as "<Direction> @ <price> (<when>)" in its mobile cell, so one pattern reads
+# direction, price and timestamp together and stays consistent across sections.
+_CALL_RE = re.compile(
+    r'\b(Buy|Sell)\b\s*@?\s*([\d,]+(?:\.\d+)?)\s*(?:\(([^)]*)\))?', re.I)
+# Standalone direction cell, present on Short Term and Multibagger but not
+# Medium Term. Used only as a fallback when the combined pattern misses.
+_DIRECTION_CELL_RE = re.compile(r'^\s*(Buy|Sell)\s*$', re.I)
 _INTEREST_RE = re.compile(r'\b(Have|No)\s+interest\b', re.I)
 # Phrases SPTulsian uses when a call has actually been exited. Being listed
 # under "Archives" is NOT itself proof of closure — Little Gems and Big Gems
@@ -457,23 +466,40 @@ def _parse_html_table(table, source):
         name = re.sub(r'\s+', ' ', cells[0].get_text(' ', strip=True))
         if not name:
             continue
-        bm = _BUY_RE.search(text)
         im = _INTEREST_RE.search(text)
         # Exit info lives in the archive table's Exit Remarks column, but the
         # cell index is not stable across rows, so read it out of the row text.
         exit_remarks = ''
+        exit_span = None
         if source == 'archive':
             em = _EXIT_RE.search(text)
             if em:
                 exit_remarks = text[em.start():em.start() + 90].strip()
+                exit_span = (em.start(), em.start() + 90)
+        # Take the first call match that does NOT sit inside the exit remark.
+        # Now that the pattern matches Sell as well as Buy, a remark reading
+        # "Exited: Sell @ 1,600" would otherwise be read as a sell call at the
+        # exit price — inventing both a direction and an entry price out of the
+        # way the position was closed. Skipping just that span, rather than
+        # truncating the text at it, keeps direction on archived rows whose
+        # remark happens to precede the call text.
+        bm = None
+        for m in _CALL_RE.finditer(text):
+            if exit_span and exit_span[0] <= m.start() < exit_span[1]:
+                continue
+            bm = m
+            break
+        direction = _html_direction(cells, bm)
         rows.append(_row(
             stock_name=name,
             target_price=_clean_float(tm.group(1)),
             timeframe=(tm.group(2) or '').strip(),
             have_interest=bool(im and im.group(1).lower() == 'have'),
             source=source,
-            call_datetime=((bm.group(2) or '').strip() if bm else ''),
-            buy_price=(_clean_float(bm.group(1)) if bm else None),
+            # _CALL_RE groups: 1 = direction, 2 = price, 3 = when.
+            call_datetime=((bm.group(3) or '').strip() if bm else ''),
+            buy_price=(_clean_float(bm.group(2)) if bm else None),
+            direction=direction,
             exit_remarks=exit_remarks,
             # These sections DO carry the reasoning as plain text — it is the
             # long free-text cell, distinguishable from the short structured
@@ -483,6 +509,32 @@ def _parse_html_table(table, source):
             rationale=_html_rationale(cells),
         ))
     return rows
+
+
+def _html_direction(cells, call_match):
+    """Buy or Sell for one HTML row, or '' if the row does not say.
+
+    Two sources, in order of trust:
+
+      1. The combined "<Direction> @ <price>" text, which every HTML section
+         renders in its mobile cell. This is also where the price comes from,
+         so if it matched, its direction describes the same call.
+      2. A standalone cell containing exactly "Buy" or "Sell". Short Term and
+         Multibagger have one; Medium Term does not.
+
+    Returns '' rather than guessing 'Buy'. A blank is treated downstream as
+    "not stated" and does not block a purchase — most rows genuinely carry no
+    direction — whereas defaulting to 'Buy' would turn a parse failure into a
+    silent assertion that the advisory said buy.
+    """
+    if call_match and call_match.group(1):
+        return call_match.group(1).strip().title()
+    for td in cells:
+        t = re.sub(r'\s+', ' ', td.get_text(' ', strip=True))
+        m = _DIRECTION_CELL_RE.match(t)
+        if m:
+            return m.group(1).title()
+    return ''
 
 
 _RATIONALE_MIN_CHARS = 60
