@@ -2,7 +2,7 @@
 
 **A single-user automated equity trading system for acting on SPTulsian advisory calls.**
 
-Version as of 2026-08-29 · Ubuntu 22.04 on OCI · Python 3.10 · Oracle Autonomous Database
+Version as of 2026-09-02 · Ubuntu 22.04 on OCI · Python 3.10 · Oracle Autonomous Database
 
 ---
 
@@ -55,11 +55,16 @@ why a scraper outage raises an alarm rather than simply producing no targets.
                           A failure here therefore HOLDS buying — which is
                           why the watchdog checks for unscored trades.
                                     |
- 10:45 IST   WATCHDOG     Confirm the scraper actually ran. Email if not.
+ 10:45 IST   WATCHDOG 1   Are the buy INPUTS ready? Scraper alive, trades
+                          scored and attributed. Email if not.
                                     |
  11:00 IST   BUY          For each PENDING_BUY: price it, size it against the
                           budget policy, place a real order.
                           Re-attempt any NEEDS_REVIEW fixed in the window.
+                                    |
+ 11:15 IST   WATCHDOG 2   Did the buy actually HAPPEN? Anything still
+                          PENDING_BUY means the run never reached it —
+                          a job that dies mid-flight still logs "complete".
                                     |
  16:00 IST   GTT          For filled buys with a target: place a GTT sell.
                           For triggered GTTs: confirm the sell actually filled,

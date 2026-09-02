@@ -15,16 +15,24 @@ either source, or they go stale silently.
 
 ## How it runs
 
-Five scheduled jobs on the VM. All cron times are **UTC**; the VM clock is UTC
-and IST is UTC+5:30.
+Six scheduled jobs on the VM. All cron times are **UTC**; the VM clock is UTC
+and IST is UTC+5:30. The canonical schedule is
+[`provisioning/crontab`](provisioning/crontab) — edit that, not `crontab -e`,
+then run `bash provisioning/install_crontab.sh`.
 
 | Job | UTC | IST | What it does |
 |---|---|---|---|
 | `main_recommend.py` | `0 4` | 09:30 | Parse the advisory email, resolve symbols, scrape targets. **No orders.** |
 | `main_conviction.py` | `45 4` | 10:15 | Score new recommendations. **Sets position size** — a failure here holds buying |
-| `spt_watchdog.py` | `15 5` | 10:45 | Alarm if the scraper has gone dark |
+| `spt_watchdog.py` | `15 5` | 10:45 | Pass 1 — are the buy **inputs** ready? |
 | `main.py` | `30 5` | 11:00 | Price, size against budget, place real buy orders |
+| `spt_watchdog.py` | `45 5` | 11:15 | Pass 2 — did the buy actually **happen**? |
 | `main_gtt_oracle.py` | `30 10` | 16:00 | Place GTT sells; close trades on confirmed fills |
+
+The watchdog runs twice for a reason. Everything before 11:00 only verifies
+the buy's *inputs*; none of it can see a run that had good inputs and then
+failed while executing. A run that dies mid-flight still logs "Buy Phase
+complete", which is how two days of buying were lost on 2026-09-01/02.
 
 The 90-minute gap between recommend and buy is deliberate: it is the window in
 which a human can fix a mis-resolved ticker **before** money moves. A symbol the
