@@ -20,6 +20,7 @@
 #     05:45    11:15   spt_watchdog.py      check buy OUTCOME
 #     10:30    16:00   main_gtt_oracle.py   place GTT sells, confirm fills
 #     */5      —       duckdns              dynamic DNS refresh
+#     */30     —       sample_warp_memory   log warp-svc RSS / restarts
 #
 # Weekday-only (1-5) everywhere except duckdns: the market is shut at the
 # weekend, and main_recommend.py refreshes the liveness watermark even when
@@ -69,3 +70,12 @@
 # Dynamic DNS — every 5 minutes, every day. Keeps the DuckDNS record pointed
 # at this VM so the dashboard's HTTPS certificate and hostname keep resolving.
 */5 * * * * /home/ubuntu/duckdns/duck.sh >/dev/null 2>&1
+
+# warp-svc memory sampler — every 30 minutes, every day. One CSV line to
+# /home/ubuntu/warp_memory.csv. The leak is capped at 300M so it restarts one
+# unit rather than taking the box down, but its RATE is not characterised:
+# ~55 MB/day over one window, then ~140 MB in three hours on 2026-09-02. The
+# events worth seeing — the approach to the cap, the restart, whether the
+# 09:30 scrape survives it — all happen unobserved. Reads systemd and /proc,
+# writes one line; it cannot affect anything it measures.
+*/30 * * * * /home/ubuntu/stock_bot_v4/provisioning/sample_warp_memory.sh >/dev/null 2>&1
