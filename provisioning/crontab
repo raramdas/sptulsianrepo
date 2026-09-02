@@ -73,9 +73,12 @@
 
 # warp-svc memory sampler — every 30 minutes, every day. One CSV line to
 # /home/ubuntu/warp_memory.csv. The leak is capped at 300M so it restarts one
-# unit rather than taking the box down, but its RATE is not characterised:
-# ~55 MB/day over one window, then ~140 MB in three hours on 2026-09-02. The
-# events worth seeing — the approach to the cap, the restart, whether the
-# 09:30 scrape survives it — all happen unobserved. Reads systemd and /proc,
-# writes one line; it cannot affect anything it measures.
+# unit rather than taking the box down, but its RATE is only loosely known:
+# roughly 30 MB/day (73 MB at the 2026-08-29 restart, ~190 MB four days
+# later), and RSS fluctuates tens of MB between consecutive reads, so single
+# samples are noisy enough to mislead — an earlier "140 MB in three hours"
+# reading was a misread of exactly that kind. The events worth seeing — the
+# approach to the cap, the restart, whether the 09:30 scrape survives one —
+# all happen unobserved. Reads systemd and /proc and writes one line, so it
+# cannot perturb what it measures.
 */30 * * * * /home/ubuntu/stock_bot_v4/provisioning/sample_warp_memory.sh >/dev/null 2>&1

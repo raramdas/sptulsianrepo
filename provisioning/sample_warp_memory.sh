@@ -4,11 +4,13 @@
 #
 # warp-svc leaks. It is capped at MemoryMax=300M so a leak restarts one unit
 # instead of triggering the global OOM that took the box down on 2026-08-26,
-# but the leak RATE has not been characterised: it looked like ~55 MB/day
-# across one three-day window, then ~140 MB in three hours on 2026-09-02.
-# A point-in-time reading cannot tell those apart, and the interesting events
-# — the approach to the cap, the restart, whether the 09:30 scrape survives it
-# — all happen while nobody is looking.
+# but the leak RATE is only loosely known: about 30 MB/day (73 MB just after
+# the 2026-08-29 restart, ~190 MB four days later). RSS also swings tens of MB
+# between consecutive reads, which is enough for a single sample to mislead —
+# a "140 MB in three hours" reading was one such misreading, taken by
+# comparing against a restart four days earlier rather than that morning.
+# The interesting events — the approach to the cap, the restart, whether the
+# 09:30 scrape survives one — all happen while nobody is looking.
 #
 # Appends one CSV line per run. Deliberately trivial: no dependencies, no
 # database, nothing that can itself fail in an interesting way.
