@@ -503,6 +503,75 @@ def mark_trade_error_oracle(trade_id, message):
         log(f"  mark_trade_error_oracle error: {e}")
 
 
+def unacted_pending_buys():
+    """Trades still PENDING_BUY after the buy run should have acted on them.
+
+    The buy run leaves nothing in this state: every trade it considers ends up
+    Open, PENDING_FILL, SKIPPED or requeued with an incremented attempt count.
+    A row still sitting here after 11:00 means the run never reached it.
+
+    That is the signature of the 2026-09-01/02 outage, where a closed database
+    connection made get_pending_buy_trades return nothing and the job reported
+    "Buy Phase complete" having bought nothing. Checked as ledger STATE rather
+    than by parsing logs, so it catches any cause — a crash, an exception
+    swallowed mid-run, a query that silently returned empty — not just the one
+    that has already happened.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT trade_id, stock_name, symbol,
+                   TO_CHAR(buy_date, 'YYYY-MM-DD') AS buy_date,
+                   NVL(buy_attempts, 0) AS buy_attempts
+            FROM trades
+            WHERE status = 'PENDING_BUY'
+              AND buy_date >= TRUNC(SYSDATE) - 3
+            ORDER BY buy_date, trade_id
+        """)
+        cols = [d[0].lower() for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+    except Exception as e:
+        log(f"  unacted_pending_buys error: {e}")
+        return []
+
+
+def stale_pending_fills(max_days=3):
+    """Orders awaiting fill confirmation for longer than the retry window.
+
+    Reconciliation promotes or requeues these every morning, so one older than
+    the retry budget means reconciliation itself is not completing. #581 sat
+    here for two days during the outage precisely because the requeue that
+    would have cleared it was the first write to fail — the stuck row then
+    re-triggered the same failure on every subsequent run.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT trade_id, stock_name, symbol, buy_order_id,
+                   NVL(buy_attempts, 0) AS buy_attempts,
+                   TRUNC(SYSDATE) - TRUNC(buy_date) AS age_days
+            FROM trades
+            WHERE status = 'PENDING_FILL'
+              AND TRUNC(SYSDATE) - TRUNC(buy_date) > :max_days
+            ORDER BY buy_date, trade_id
+        """, {'max_days': int(max_days)})
+        cols = [d[0].lower() for d in cursor.description]
+        rows = [dict(zip(cols, r)) for r in cursor.fetchall()]
+        cursor.close()
+        return rows
+    except Exception as e:
+        log(f"  stale_pending_fills error: {e}")
+        return []
+
+
 def unscored_pending_buys():
     """Trades awaiting purchase that main_conviction.py has not scored.
 
