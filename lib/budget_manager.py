@@ -34,9 +34,31 @@ NON_BUYING_STATUSES = ('ERROR', 'SKIPPED', 'NEEDS_REVIEW', 'PENDING_BUY',
 
 
 def get_oracle_connection():
+    """The process-wide Oracle connection. Callers must NOT close it —
+    close_oracle_connection() at the end of a run is the only place that does.
+
+    A closed connection object is still truthy, so caching it naively meant one
+    stray close() poisoned every later call in the process with DPY-1001 and
+    the run carried on reporting success. The health check makes that class of
+    mistake self-healing rather than fatal: a dead handle is discarded and a
+    fresh connection opened. It is cheap (a local state check, no round trip)
+    and runs before every use.
+    """
     global _oracle_conn
-    if _oracle_conn:
-        return _oracle_conn
+    if _oracle_conn is not None:
+        try:
+            if _oracle_conn.is_healthy():
+                return _oracle_conn
+            log("  Oracle connection was unhealthy — reconnecting")
+        except Exception:
+            # Older driver without is_healthy(), or an object too broken to
+            # ask. Either way it cannot be reused.
+            log("  Oracle connection unusable — reconnecting")
+        try:
+            _oracle_conn.close()
+        except Exception:
+            pass
+        _oracle_conn = None
     try:
         _oracle_conn = oracledb.connect(
             user=ORACLE_USER,
@@ -625,8 +647,14 @@ def open_qty_for_symbol(symbol, exclude_trade_id=None):
     except Exception as e:
         log(f"  open_qty_for_symbol error for {symbol}: {e}")
         return None
-    finally:
-        conn.close()
+    # Deliberately does NOT close the connection. get_oracle_connection()
+    # hands out a process-wide singleton; closing it here closed it for every
+    # later caller in the run. That is not theoretical — it broke buying on
+    # 2026-09-01 and 2026-09-02: reconciliation called this, the connection
+    # died, and requeue_for_retry and get_pending_buy_trades then failed with
+    # DPY-1001, so the run reported "Buy Phase complete" having found zero
+    # trades and bought nothing. close_oracle_connection() at the end of the
+    # run is the only place that should close it.
 
 
 def get_pending_fill_trades():
