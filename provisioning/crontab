@@ -1,0 +1,71 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Stockbot / Capital Ledger — scheduled jobs for the `ubuntu` user.
+#
+# CANONICAL SOURCE. Install with:
+#     bash provisioning/install_crontab.sh
+#
+# Edit this file, never `crontab -e`. The schedule was VM-only until
+# 2026-09-02, which meant a rebuild would have silently lost it and any
+# hand-edit drifted from the documentation with nothing to compare against.
+#
+# ALL TIMES ARE UTC. This VM's clock is UTC (timedatectl: Etc/UTC) and IST is
+# UTC+5:30, so subtract 5:30 from an IST time to get the cron hour. Entries
+# are listed in running order, which is not numeric order once the hour rolls.
+#
+#     UTC      IST     job
+#     04:00    09:30   main_recommend.py    resolve symbols, scrape targets
+#     04:45    10:15   main_conviction.py   score; sets position size
+#     05:15    10:45   spt_watchdog.py      check buy INPUTS
+#     05:30    11:00   main.py              price, size, buy
+#     05:45    11:15   spt_watchdog.py      check buy OUTCOME
+#     10:30    16:00   main_gtt_oracle.py   place GTT sells, confirm fills
+#     */5      —       duckdns              dynamic DNS refresh
+#
+# Weekday-only (1-5) everywhere except duckdns: the market is shut at the
+# weekend, and main_recommend.py refreshes the liveness watermark even when
+# no tips arrive, so market holidays do not false-alarm the watchdog.
+# ─────────────────────────────────────────────────────────────────────────
+
+# 09:30 IST — Phase 1. Parses today's advisory emails, resolves each tip to a
+# Kite symbol, and pulls targets/timeframes from SPTulsian. Places NO orders:
+# writes PENDING_BUY (clean) or NEEDS_REVIEW (ambiguous), which is what gives
+# the 90-minute window to fix a mis-resolved ticker before money moves.
+# (Corrected 2026-08-16: was '30 4' = 10:00 IST, contradicting its own comment
+# and leaving only 60 minutes.)
+0 4 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 main_recommend.py >> /home/ubuntu/recommend.log 2>&1
+
+# 10:15 IST — conviction scoring, 45 min after the recommend run and 45 min
+# before the buy, so a new recommendation is scored while there is still time
+# to act on it. NOT display-only since 2026-08-26: the lite score sets the
+# ticket size and can refuse a buy outright, so a failure here HOLDS buying.
+# That is why the 10:45 watchdog checks for unscored pending trades.
+45 4 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 main_conviction.py >> /home/ubuntu/conviction.log 2>&1
+
+# 10:45 IST — watchdog, pass 1: are the buy INPUTS ready? Runs 75 min after
+# the recommend job, well past when the scrape and its liveness watermark
+# should have happened, and 15 min before the buy. A dead scraper is otherwise
+# indistinguishable from a quiet day, because main_recommend.py deliberately
+# continues without targets rather than failing.
+15 5 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 spt_watchdog.py >> /home/ubuntu/spt_watchdog.log 2>&1
+
+# 11:00 IST — Phase 2. Reads PENDING_BUY (plus retries), prices each trade,
+# sizes it against the budget policy and conviction bands, and places real
+# orders. The only code path in the system that spends money.
+30 5 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 main.py >> /home/ubuntu/bot.log 2>&1
+
+# 11:15 IST — watchdog, pass 2: did the buy actually HAPPEN? Same script; the
+# outcome check is time-gated and the 10:45 run skips it. This exists because
+# a run that fails mid-flight still logs "Buy Phase complete" — on 2026-09-01
+# and 02 a closed database connection stopped all buying for two days while
+# every pre-flight check reported healthy.
+45 5 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 spt_watchdog.py >> /home/ubuntu/spt_watchdog.log 2>&1
+
+# 16:00 IST — GTT (sell) side. Places GTT sells for filled buys with a target,
+# and closes trades on CONFIRMED fills only. Switched to the Oracle-only
+# script 2026-08-01, retiring the Sheet-driven main_gtt.py after dry-run
+# validation found and fixed two bugs.
+30 10 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 main_gtt_oracle.py >> /home/ubuntu/gtt.log 2>&1
+
+# Dynamic DNS — every 5 minutes, every day. Keeps the DuckDNS record pointed
+# at this VM so the dashboard's HTTPS certificate and hostname keep resolving.
+*/5 * * * * /home/ubuntu/duckdns/duck.sh >/dev/null 2>&1

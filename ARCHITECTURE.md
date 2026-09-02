@@ -597,6 +597,16 @@ The `spt_*` columns record what SPTulsian said, and nothing scores on them yet:
 
 ### 3.8 Schedule
 
+The canonical schedule is **`provisioning/crontab`**, installed with
+`bash provisioning/install_crontab.sh`. Edit that file, not `crontab -e`.
+
+It lived only on the VM until 2026-09-02, which meant a rebuild would have
+lost it silently and a hand-edit could drift from this document with nothing
+to compare against. `install_crontab.sh --check` answers "is the live schedule
+still what the repo says?" without touching anything, and exits non-zero if
+not — it compares the schedule lines only, so a comment edit is not drift.
+
+
 The VM clock is **UTC**; IST is UTC+5:30.
 
 | Job | Cron (UTC) | IST | Purpose |

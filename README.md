@@ -85,7 +85,7 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 ├── tools/                 # recalibrate_bands.py, dryrun_sizing.py, md2pdf.py
 ├── archive/               # superseded / one-off — see archive/README.md
 ├── bot/                   # multi-tenant variant — NOT scheduled
-├── provisioning/          # tenant onboarding for the bot/ tree
+├── provisioning/          # crontab (canonical), systemd drop-ins, tenant onboarding
 └── tests/                 # logic validated against SQLite mocks
 ```
 
@@ -121,7 +121,8 @@ ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
   sudo systemctl is-active warp-svc stockbot-dashboard stockbot-capture-api
   free -m                                                      # swap MUST be non-zero
   systemctl show warp-svc -p MemoryCurrent                     # ~80MB; capped at 300MB
-  cd /home/ubuntu/stock_bot_v4 && python3 spt_watchdog.py --check-only'
+  cd /home/ubuntu/stock_bot_v4 && python3 spt_watchdog.py --check-only
+  bash provisioning/install_crontab.sh --check                 # schedule drift'
 ```
 
 **The VM has 956 MB of RAM and that is the binding constraint.** `warp-svc`
