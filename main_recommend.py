@@ -17,7 +17,8 @@ from lib.kite_client import get_enctoken, resolve_kite_symbol
 from lib.email_reader import parse_todays_emails
 from lib.spt_scraper import refresh_spt_data, scrape_spt_stock, quit_spt_driver
 from lib.budget_manager import (get_stock_cap_type, insert_trade_to_oracle,
-                                close_oracle_connection, open_qty_for_symbol)
+                                close_oracle_connection, open_qty_for_symbol,
+                                already_recommended_today)
 
 
 def holdings_qty_for(symbol):
@@ -38,6 +39,17 @@ def holdings_qty_for(symbol):
 
 
 def process_tip(tip, enctoken):
+    # This job is written to run once a morning and appended blindly, so a
+    # re-run — the natural response to a scraper outage — duplicated every tip.
+    # It happened on 2026-09-08 and created four phantom PENDING_BUY rows that
+    # the buy run would have treated as independent positions. Checked before
+    # any work, so a re-run is a safe way to recover rather than a hazard.
+    dup = already_recommended_today(tip.get('stock'), tip.get('kite_symbol'))
+    if dup:
+        log(f"  SKIP (already recorded today): {tip['stock']} — "
+            f"#{dup['trade_id']} is {dup['status']}")
+        return
+
     # Target/Timeframe/Have-Interest from SPTulsian, via the WARP proxy. Logs
     # in and scrapes once per run, then serves each tip from that cache.
     # Returns blanks if the scrape fails or only a closed call matches — a

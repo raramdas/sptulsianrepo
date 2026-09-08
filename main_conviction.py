@@ -88,6 +88,25 @@ def has_model_column(conn):
     return cur.fetchone()[0] > 0
 
 
+def _num_or_none(x):
+    """A finite float, or None. NaN and infinity become None.
+
+    Oracle NUMBER cannot represent either, so binding one fails the whole
+    INSERT with DPY-4004 — and pandas hands back NaN, never None, for a
+    missing numeric. Every value this module sends to a NUMBER column goes
+    through here.
+    """
+    if x is None:
+        return None
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return None
+    if v != v or v in (float('inf'), float('-inf')):
+        return None
+    return v
+
+
 def has_column(conn, name):
     cur = conn.cursor()
     cur.execute("""SELECT COUNT(*) FROM user_tab_columns
@@ -113,8 +132,11 @@ def save_score(conn, trade, result, with_model=True, with_z=True):
         'symbol': trade['symbol'],
         'stock_name': trade['stock_name'],
         'category_name': trade['category_name'],
-        'score': result['score'],
-        'evidence_pct': result['evidence_pct'],
+        # Every NUMBER bind is sanitised here as well as at source. A NaN
+        # reaching Oracle fails the entire INSERT, and the last place that
+        # can be prevented is the last place it is cheap to do so.
+        'score': _num_or_none(result['score']),
+        'evidence_pct': _num_or_none(result['evidence_pct']),
         'tier': result['tier'],
         'verdict': result['verdict'],
         'sector': result.get('sector'),
@@ -124,7 +146,7 @@ def save_score(conn, trade, result, with_model=True, with_z=True):
         # what it is rather than asking the reader to trust a number.
         'layers_json': json.dumps(result['layers'], default=str),
         **({'model': result.get('model', 'full')} if with_model else {}),
-        **({'reach_z': result.get('reach_z')} if with_z else {}),
+        **({'reach_z': _num_or_none(result.get('reach_z'))} if with_z else {}),
     })
 
 
@@ -157,7 +179,12 @@ def run(all_open=False, engine='lite', dry_run=False):
             if not sym:
                 continue
             try:
-                target = float(t['target_price']) if t['target_price'] is not None else None
+                # A missing target arrives from pandas as NaN, not None, so the
+                # `is not None` test passes and float(NaN) is NaN — which then
+                # satisfies no downstream guard, because `not nan` and
+                # `nan <= 0` are both False. It reached Oracle as a NaN bind
+                # and failed the whole INSERT with DPY-4004.
+                target = _num_or_none(t['target_price'])
             except (TypeError, ValueError):
                 target = None
             try:

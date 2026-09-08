@@ -179,12 +179,32 @@ def score_trend(close):
                    f'price {price:,.0f} / 50DMA {ma50:,.0f} / 200DMA {ma200:,.0f}{note}')]
 
 
+def _positive(x):
+    """True only for a real, finite, positive number.
+
+    NaN needs saying out loud because every intuitive guard fails open on it:
+    `not nan` is False and `nan <= 0` is False, so a NaN target passed straight
+    through `if not spt_target or spt_target <= 0` and propagated into a NaN
+    score. Oracle NUMBER cannot represent NaN, so it surfaced as DPY-4004 at
+    INSERT time — and only ever when targets were missing, which is to say only
+    during a scraper outage, hidden inside a bigger failure.
+    """
+    if x is None:
+        return False
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return False
+    return v == v and v not in (float('inf'), float('-inf')) and v > 0
+
+
 def reach_z(price, spt_target, daily_vol):
     """Sigmas of 3-month movement needed to touch the target. None if unknowable."""
-    if not spt_target or spt_target <= 0 or price <= 0 or not daily_vol or daily_vol <= 0:
+    if not (_positive(spt_target) and _positive(price) and _positive(daily_vol)):
         return None
     gap = (spt_target - price) / price
-    return gap / (daily_vol * (HORIZON_DAYS ** 0.5))
+    z = gap / (daily_vol * (HORIZON_DAYS ** 0.5))
+    return z if z == z else None          # never hand back NaN
 
 
 def score_reachability(close, price, spt_target):
@@ -208,15 +228,19 @@ def score_reachability(close, price, spt_target):
     tail at the same time. That trade-off was made deliberately.
     """
     budget = BUDGETS['reachability']
-    if not spt_target or spt_target <= 0:
+    # _positive, not `not spt_target`: a NaN target satisfies neither `not x`
+    # nor `x <= 0`, so the obvious guard lets it through and NaN then poisons
+    # every arithmetic result downstream. A missing target arrives as NaN
+    # rather than None whenever it comes via pandas, which is always.
+    if not _positive(spt_target):
         return [_unknown('Reachability', 'no advisory target on file', budget)]
 
     rets = close.pct_change().dropna().tail(VOL_LOOKBACK)
     if len(rets) < 30:
         return [_unknown('Reachability', f'only {len(rets)} returns (need >=30)', budget)]
     vol = float(rets.std())
-    if vol <= 0:
-        return [_unknown('Reachability', 'zero realised volatility', budget)]
+    if not _positive(vol):
+        return [_unknown('Reachability', 'no usable realised volatility', budget)]
 
     gap = (spt_target - price) / price
     if gap <= 0:

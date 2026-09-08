@@ -32,6 +32,7 @@ Test independently:
 import os
 import re
 import json
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -308,12 +309,71 @@ def build_session():
     return session
 
 
+def ensure_warp_connected(log=_clog):
+    """If the WARP tunnel is down, bring it back. Returns True if it acted.
+
+    `systemctl is-active warp-svc` reports the DAEMON, not the tunnel, and the
+    two come apart: on 2026-09-04 the tunnel hit "connection driver stopped
+    unexpectedly" while the unit stayed active and the SOCKS5 port kept
+    accepting connections that then timed out. Every health check we had —
+    is-active, the memory sampler, the service list in the runbook — reported
+    healthy for four days while no scrape succeeded.
+
+    So the scraper asks the tunnel itself, and reconnects rather than merely
+    reporting. `warp-cli connect` needs no sudo and is idempotent when already
+    connected, which is what makes this safe to call on any failure path.
+
+    Best-effort by design: if warp-cli is missing or misbehaves, this returns
+    False and the caller fails the way it did before.
+    """
+    if not SPTULSIAN_PROXY:
+        return False
+    try:
+        st = subprocess.run(['warp-cli', '--accept-tos', 'status'],
+                            capture_output=True, text=True, timeout=20)
+        out = (st.stdout or '') + (st.stderr or '')
+        if 'Connected' in out and 'Disconnected' not in out:
+            return False                      # tunnel is fine; not the problem
+        log(f"  WARP tunnel is not connected ({out.strip().splitlines()[0] if out.strip() else 'no status'})"
+            f" — reconnecting")
+        subprocess.run(['warp-cli', '--accept-tos', 'connect'],
+                       capture_output=True, text=True, timeout=40)
+        for _ in range(10):
+            time.sleep(3)
+            st = subprocess.run(['warp-cli', '--accept-tos', 'status'],
+                                capture_output=True, text=True, timeout=20)
+            if 'Connected' in ((st.stdout or '') + (st.stderr or '')):
+                log("  WARP tunnel reconnected")
+                return True
+        log("  WARP tunnel did not come back")
+        return True                            # we acted; caller may retry
+    except Exception as e:
+        log(f"  could not check/reconnect WARP: {type(e).__name__}: {e}")
+        return False
+
+
 def login_session(username, password, log=_clog):
     """Log into sptulsian.com and return an authenticated requests.Session.
-    Raises SPTLoginError on any failure. Does not print the password."""
+    Raises SPTLoginError on any failure. Does not print the password.
+
+    A first failure triggers one WARP reconnect and one retry: the most common
+    cause of the login timing out is a dead tunnel, and that is recoverable in
+    seconds without a human.
+    """
     if not username or not password:
         raise SPTLoginError("SPT_USERNAME/SPT_PASSWORD not set")
 
+    try:
+        return _login_once(username, password, log=log)
+    except Exception as first:
+        if not ensure_warp_connected(log=log):
+            raise
+        log(f"  retrying login after WARP reconnect (first attempt: "
+            f"{type(first).__name__})")
+        return _login_once(username, password, log=log)
+
+
+def _login_once(username, password, log=_clog):
     session = build_session()
 
     r = session.get(f'{BASE_URL}/login', timeout=30)

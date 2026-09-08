@@ -212,6 +212,40 @@ def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
         return True, category_id
 
 
+def already_recommended_today(stock_name, symbol):
+    """Is this stock already on today's ledger in a state that will be acted on?
+
+    main_recommend.py is written to run once a morning, so it appended blindly.
+    Re-running it — which is the natural thing to do after a scraper outage, and
+    what happened on 2026-09-08 — silently duplicated four trades, each of which
+    the buy run would then have treated as an independent position.
+
+    Only live states count. A SKIPPED or ERROR row from earlier in the day is
+    history, and a re-run after fixing whatever caused it SHOULD create a fresh
+    row; blocking on those would make the outage unrecoverable.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return None
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT trade_id, status FROM trades
+            WHERE buy_date >= TRUNC(SYSDATE)
+              AND status IN ('PENDING_BUY', 'NEEDS_REVIEW', 'PENDING_FILL',
+                             'Open', 'ADVISORY_SELL')
+              AND (UPPER(stock_name) = UPPER(:name)
+                   OR (:sym IS NOT NULL AND UPPER(symbol) = UPPER(:sym)))
+            ORDER BY trade_id DESC
+        """, {'name': (stock_name or '').strip(), 'sym': (symbol or '').strip() or None})
+        row = cur.fetchone()
+        cur.close()
+        return {'trade_id': row[0], 'status': row[1]} if row else None
+    except Exception as e:
+        log(f"  already_recommended_today error: {e}")
+        return None
+
+
 def insert_trade_to_oracle(tip, category_id):
     """Insert the trade into the Oracle TRADES table (parallel to the Google Sheet)."""
     conn = get_oracle_connection()
