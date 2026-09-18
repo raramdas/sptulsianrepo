@@ -18,7 +18,9 @@ from lib.email_reader import parse_todays_emails
 from lib.spt_scraper import refresh_spt_data, scrape_spt_stock, quit_spt_driver
 from lib.budget_manager import (get_stock_cap_type, insert_trade_to_oracle,
                                 close_oracle_connection, open_qty_for_symbol,
-                                already_recommended_today)
+                                already_recommended_today,
+                                pending_buys_missing_interest,
+                                update_trade_advisory_data)
 
 
 def holdings_qty_for(symbol):
@@ -36,6 +38,43 @@ def holdings_qty_for(symbol):
     except Exception as e:
         log(f"  (could not check holdings for {symbol}: {type(e).__name__})")
         return 0
+
+
+def backfill_missing_interest():
+    """Fill in advisory data for queued trades that never got any.
+
+    A trade whose 9:30 scrape failed is held with a blank have_interest, and
+    the retry only re-attempts the BUY — nothing ever re-attempts the LOOKUP,
+    because this job reads today's emails and those trades are from an earlier
+    day. So a tip that missed its data on the day could never acquire it, and
+    sat being retried until the window expired: #821-824 were stuck exactly
+    that way from 2026-09-17, still being reported by the watchdog a day later.
+
+    The scrape cache already holds every live call, so matching a held trade
+    against it costs nothing beyond the query. Only blank rows are touched —
+    a real 'No Interest' is an answer and must not be overwritten by a later
+    lookup that happens to miss.
+    """
+    pending = pending_buys_missing_interest()
+    if not pending:
+        return
+    log(f"Backfilling advisory data for {len(pending)} held trade(s)...")
+    filled = 0
+    for t in pending:
+        spt = scrape_spt_stock(t['stock_name'], t.get('category_name', ''), log=log)
+        if not spt.get('have_interest'):
+            log(f"  #{t['trade_id']} {t['stock_name']}: still no live call — leaving held")
+            continue
+        update_trade_advisory_data(
+            t['trade_id'],
+            have_interest=spt['have_interest'],
+            target_price=spt.get('target') or None,
+            timeframe=spt.get('timeframe') or '',
+        )
+        filled += 1
+        log(f"  #{t['trade_id']} {t['stock_name']}: {spt['have_interest']}"
+            f"{', target ' + str(spt['target']) if spt.get('target') else ''}")
+    log(f"Backfilled {filled} of {len(pending)} held trade(s).")
 
 
 def process_tip(tip, enctoken):
@@ -124,9 +163,17 @@ def run():
     # leave the watermark stale and spt_watchdog.py would cry wolf.
     refresh_spt_data(log=log)
 
+    # Before the no-tips early return: trades held from an EARLIER day are
+    # exactly what this recovers, and a day with no new tips is still a day
+    # they should get their data. After the return, a quiet Monday would leave
+    # Friday's held trades stranded for another day.
+    backfill_missing_interest()
+
     tips = parse_todays_emails()
     if not tips:
         log("No tips found today.")
+        quit_spt_driver()
+        close_oracle_connection()
         return
     log(f"Tips found: {[t['stock'] for t in tips]}")
 

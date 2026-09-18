@@ -212,6 +212,38 @@ def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
         return True, category_id
 
 
+def update_trade_advisory_data(trade_id, have_interest, target_price=None, timeframe=''):
+    """Fill in advisory fields on a trade that was recorded without them.
+
+    Only ever writes over a BLANK have_interest — the caller selects on that,
+    and the WHERE clause enforces it again here. A real 'No Interest' is an
+    answer, not a gap, and overwriting one with a later lookup that happened to
+    miss would silently turn a refusal into a purchase.
+    """
+    conn = get_oracle_connection()
+    if not conn:
+        return 0
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE trades
+            SET have_interest = :hi,
+                target_price  = NVL(:tp, target_price),
+                timeframe     = NVL(:tf, timeframe),
+                notes         = 'Advisory data backfilled after the scrape that '
+                                || 'should have provided it failed.',
+                updated_at    = SYSTIMESTAMP
+            WHERE trade_id = :id
+              AND (have_interest IS NULL OR TRIM(have_interest) IS NULL)
+        """, {'hi': have_interest, 'tp': target_price,
+              'tf': timeframe or None, 'id': trade_id})
+        conn.commit()
+        return cur.rowcount
+    except Exception as e:
+        log(f"  update_trade_advisory_data error for #{trade_id}: {e}")
+        return 0
+
+
 def already_recommended_today(stock_name, symbol):
     """Is this stock already on today's ledger in a state that will be acted on?
 
@@ -650,7 +682,7 @@ def pending_buys_missing_interest():
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT trade_id, stock_name, symbol,
+            SELECT trade_id, stock_name, symbol, category_name,
                    TO_CHAR(buy_date, 'YYYY-MM-DD') AS buy_date
             FROM trades
             WHERE status IN ('PENDING_BUY', 'NEEDS_REVIEW')

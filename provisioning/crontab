@@ -22,6 +22,7 @@
 #     10:30    16:00   main_gtt_oracle.py   place GTT sells, confirm fills
 #     */5      —       duckdns              dynamic DNS refresh
 #     */30     —       sample_warp_memory   log warp-svc RSS / restarts
+#     */20     —       warp_keeper          recycle the tunnel before it degrades
 #
 # Weekday-only (1-5) everywhere except duckdns: the market is shut at the
 # weekend, and main_recommend.py refreshes the liveness watermark even when
@@ -95,3 +96,17 @@
 # all happen unobserved. Reads systemd and /proc and writes one line, so it
 # cannot perturb what it measures.
 */30 * * * * /home/ubuntu/stock_bot_v4/provisioning/sample_warp_memory.sh >/dev/null 2>&1
+
+# WARP tunnel keeper — every 20 minutes, every day. Restarts warp-svc if the
+# proxy cannot actually fetch, or pre-emptively once memory passes 180MB.
+#
+# A restart, not a reconnect: on 2026-09-18 warp-cli reported "Connected /
+# Network healthy" at 230MB while the proxy returned HTTP 000, and only a
+# restart fixed it (230MB -> 75MB, healthy in 3s). Health is therefore judged
+# by a real fetch, never by what the daemon says about itself — systemctl
+# is-active and warp-cli status have both been wrong every time it mattered.
+#
+# Every outage in this system's history correlates with high warp memory
+# (08-26 OOM, 09-04 four dark days, 09-17, 09-18). The scraper needs the proxy
+# for about a minute a day, so a 3-second recycle costs nothing.
+*/20 * * * * /home/ubuntu/stock_bot_v4/provisioning/warp_keeper.sh >/dev/null 2>&1
