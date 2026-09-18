@@ -14,6 +14,7 @@
 #
 #     UTC      IST     job
 #     04:00    09:30   main_recommend.py    resolve symbols, scrape targets
+#     04:30    10:00   spt_selfheal.py      repair the scrape path, re-run if needed
 #     04:45    10:15   main_conviction.py   score; sets position size
 #     05:15    10:45   spt_watchdog.py      check buy INPUTS
 #     05:30    11:00   main.py              price, size, buy
@@ -34,6 +35,18 @@
 # (Corrected 2026-08-16: was '30 4' = 10:00 IST, contradicting its own comment
 # and leaving only 60 minutes.)
 0 4 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 main_recommend.py >> /home/ubuntu/recommend.log 2>&1
+
+# 10:00 IST — self-heal. If today's scrape did not succeed, repair what is
+# broken (reconnect or restart WARP, vacuum the journal if the disk is tight)
+# and RE-RUN main_recommend + main_conviction, while there is still time for
+# the 11:00 buy to proceed normally. Exits silently when the scrape is healthy.
+#
+# Every outage this system has had was detected correctly and lasted for days
+# anyway — 2026-08-26, 09-01, 09-04, 09-17 — because an email waits for a human
+# and the buy run does not. This closes that gap. It never places an order, and
+# it ABORTS every repair if direct egress has stopped leaving from the static
+# IP, because a proxy leak on the broker path is worse than a missed day.
+30 4 * * 1-5 cd /home/ubuntu/stock_bot_v4 && /usr/bin/python3 spt_selfheal.py >> /home/ubuntu/selfheal.log 2>&1
 
 # 10:15 IST — conviction scoring, 45 min after the recommend run and 45 min
 # before the buy, so a new recommendation is scored while there is still time
