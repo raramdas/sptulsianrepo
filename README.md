@@ -8,26 +8,40 @@ and technical design, failure handling, and the reasoning behind the
 non-obvious parts. Read that before changing anything load-bearing.
 
 This README is also available as a [PDF](README.pdf). Both are committed
-artefacts — regenerate them with `python3 tools/md2pdf.py --all` after editing
-either source, or they go stale silently.
+artefacts — regenerate them with `./.venv/bin/python tools/md2pdf.py --all`
+after editing either source, or they go stale silently. (The venv interpreter,
+not bare `python3`: the converter needs `markdown`, which is installed there.)
 
 ---
 
 ## How it runs
 
-Six scheduled jobs on the VM. All cron times are **UTC**; the VM clock is UTC
-and IST is UTC+5:30. The canonical schedule is
+Seven scheduled jobs plus three maintenance loops. All cron times are **UTC**;
+the VM clock is UTC and IST is UTC+5:30. The canonical schedule is
 [`provisioning/crontab`](provisioning/crontab) — edit that, not `crontab -e`,
 then run `bash provisioning/install_crontab.sh`.
 
 | Job | UTC | IST | What it does |
 |---|---|---|---|
-| `main_recommend.py` | `0 4` | 09:30 | Parse the advisory email, resolve symbols, scrape targets. **No orders.** |
+| `main_recommend.py` | `0 4` | 09:30 | Parse the advisory email, resolve symbols, scrape targets, backfill held trades. **No orders.** |
+| `spt_selfheal.py` | `30 4` | 10:00 | If the 09:30 scrape failed: repair the tunnel and re-run — while the buy can still happen |
 | `main_conviction.py` | `45 4` | 10:15 | Score new recommendations. **Sets position size** — a failure here holds buying |
 | `spt_watchdog.py` | `15 5` | 10:45 | Pass 1 — are the buy **inputs** ready? |
 | `main.py` | `30 5` | 11:00 | Price, size against budget, place real buy orders |
 | `spt_watchdog.py` | `45 5` | 11:15 | Pass 2 — did the buy actually **happen**? |
 | `main_gtt_oracle.py` | `30 10` | 16:00 | Place GTT sells; close trades on confirmed fills |
+
+And three that run all day:
+
+| Loop | Cron | What it does |
+|---|---|---|
+| `provisioning/warp_keeper.sh` | `*/20` | Restarts `warp-svc` when a real fetch fails, or at 180 MB — before it degrades |
+| `provisioning/sample_warp_memory.sh` | `*/30` | Records memory; this is where the ~28 MB/day leak rate comes from |
+| DuckDNS refresh | `*/5` | Dynamic DNS |
+
+Every repair runs **before** the thing it protects — self-heal at 10:00 ahead
+of scoring at 10:15 ahead of buying at 11:00. A repair scheduled after the buy
+window would be a report, not a recovery.
 
 The watchdog runs twice for a reason. Everything before 11:00 only verifies
 the buy's *inputs*; none of it can see a run that had good inputs and then
@@ -49,6 +63,9 @@ python3 tools/dryrun_sizing.py             # what the buy run WOULD do; writes n
 python3 tools/recalibrate_bands.py         # re-derive sizing cutoffs
 python3 spt_capture.py --dry-run           # preview scraped targets, then save
 python3 spt_watchdog.py --check-only       # health check, never sends mail
+python3 spt_selfheal.py --check-only       # what would it repair? changes nothing
+bash provisioning/warp_keeper.sh --check   # real fetch through the proxy + memory
+bash provisioning/install_crontab.sh --check   # has the live schedule drifted?
 ```
 
 Run `tools/dryrun_sizing.py` before any change that affects money — it mirrors
@@ -67,6 +84,7 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 ├── main.py                # Phase 2: price, size, buy                 ← cron
 ├── main_gtt_oracle.py     # Phase 3: GTT sells, confirm fills, close  ← cron
 ├── spt_watchdog.py        # Liveness alarm for the scraper            ← cron
+├── spt_selfheal.py        # Repair the scrape path and re-run the day ← cron
 ├── main_conviction.py     # Evidence scoring; the lite score sets position size
 ├── spt_capture.py         # Manual review-then-save of scraped targets
 │
@@ -94,6 +112,10 @@ run. Everything they share is in `lib/`, and superseded scripts are in
 ├── archive/               # superseded / one-off — see archive/README.md
 ├── bot/                   # multi-tenant variant — NOT scheduled
 ├── provisioning/          # crontab (canonical), systemd drop-ins, tenant onboarding
+│   ├── crontab            #   the schedule — edit this, never `crontab -e`
+│   ├── install_crontab.sh #   installs it; --check reports drift
+│   ├── warp_keeper.sh     #   recycles warp-svc before it degrades       ← cron
+│   └── sample_warp_memory.sh  # leak-rate evidence                       ← cron
 └── tests/                 # logic validated against SQLite mocks
 ```
 
@@ -117,8 +139,16 @@ git add -A && git commit && git push
 ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
   cd /home/ubuntu/stock_bot_v4 && git pull -q
   cd /home/ubuntu/stockbot     && git pull -q
-  sudo systemctl restart stockbot-dashboard'
+  sudo systemctl restart stockbot-dashboard
+  cd /home/ubuntu/stock_bot_v4 && git status --porcelain'   # MUST print nothing
 ```
+
+**`git pull` is the only supported deploy.** `scp` also works, which is the
+trap: the VM then runs code that exists nowhere else, and a dirty `git status`
+is the only evidence. That happened for ten days in September 2026 — a blocked
+push, deploys carried on by hand, and no way to answer "is production running
+the fix?" without checksumming files one by one. Nothing broke; the loss was
+knowing. See [ARCHITECTURE.md §5.1](ARCHITECTURE.md).
 
 ## Health check
 
@@ -128,9 +158,12 @@ ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
   curl -s --socks5-hostname 127.0.0.1:40000 ifconfig.me; echo  # MUST be Cloudflare
   sudo systemctl is-active warp-svc stockbot-dashboard stockbot-capture-api
   free -m                                                      # swap MUST be non-zero
-  systemctl show warp-svc -p MemoryCurrent                     # ~80MB; capped at 300MB
-  cd /home/ubuntu/stock_bot_v4 && python3 spt_watchdog.py --check-only
-  bash provisioning/install_crontab.sh --check                 # schedule drift'
+  cd /home/ubuntu/stock_bot_v4
+  bash provisioning/warp_keeper.sh --check      # a REAL fetch + memory; see below
+  bash provisioning/install_crontab.sh --check  # schedule drift
+  python3 spt_selfheal.py --check-only          # would it need to repair anything?
+  python3 spt_watchdog.py --check-only          # never sends mail
+  git status --porcelain'                       # MUST be empty
 ```
 
 **The VM has 956 MB of RAM and that is the binding constraint.** `warp-svc`
@@ -141,6 +174,17 @@ handshake but nothing ever replied. It is now capped at `MemoryMax=300M` with
 hangs at "banner exchange" again, that is this, and it needs a **force**
 reboot from the OCI console — a graceful one hangs, because systemd is part of
 what is stuck. See [ARCHITECTURE.md §4.4](ARCHITECTURE.md).
+
+**The cap alone was not enough, because `warp-svc` degrades before it dies.**
+At 230 MB — under the cap, so never restarted — it reported "Connected /
+Network healthy" while the proxy returned HTTP 000 to everything. `warp-cli
+connect` did nothing; a restart fixed it in three seconds.
+
+So **never trust `systemctl is-active` or `warp-cli status` here.** They report
+that a process exists and what the tunnel believes; neither answers whether the
+scraper can fetch. `warp_keeper.sh` asks the only question that matters by
+making a real request, and recycles at 180 MB — inside the degradation window,
+below the cap. At ~28 MB/day that is roughly twice a week.
 
 **If the first command ever returns a Cloudflare address, stop.** The scraper's
 proxy has escaped its scope and broker traffic is no longer leaving from the
@@ -203,9 +247,10 @@ The invariants below hold by construction. Preserve them.
 3. A trade is `Closed` only on a **confirmed** sell fill, never on GTT status
    alone.
 4. Conviction sizing is **on** (`CONVICTION_SIZING_ENABLED`), using the lite
-   engine: `>85 → ₹25,000`, `63–85 → ₹10,000`, below 63 not bought. The
+   engine: `>92 → ₹25,000`, `69–92 → ₹10,000`, below 69 not bought. The
    thresholds are percentile-matched to the lite score distribution, not
-   carried over from the full engine — see `lib/config.py` for the working.
+   carried over from the full engine — see `lib/bands.py`, which is their
+   single definition and the one the dashboard reads too.
    A score can therefore now *skip* a recommendation, so a conviction-run
    failure holds buying; `spt_watchdog.py` alarms on unscored pending buys.
    Note the score is still **unvalidated**: the only backtest to date found
@@ -231,13 +276,16 @@ convention has caught a pooled-budget bug, a GTT close that recorded no sell
 price, and a `DataFrame.__bool__` call that silently nulled every financial
 statement in the conviction engine.
 
-Two recent failures worth knowing before you touch reconciliation or the
-scraper — both documented in [ARCHITECTURE.md §4.5](ARCHITECTURE.md):
+Three failures worth knowing before you touch reconciliation, the scraper, or
+the retry path — documented in [ARCHITECTURE.md §4.5–4.6](ARCHITECTURE.md):
 
 - A holdings-based fill inference claimed all 8 BSE shares for a 3-share order
   that never filled, recording ₹26,608 of stock that was never bought.
 - A SELL call was dropped at a regex that hardcoded `(Buy @ price)` — not
   bought, but never recorded or surfaced either.
+- A trade whose scrape failed was retried daily for its **buy**, but nothing
+  ever retried its **lookup**, so the missing data could never arrive. Four
+  trades looped that way for two days before ageing out unbought.
 
 ## Note on the conviction layer
 

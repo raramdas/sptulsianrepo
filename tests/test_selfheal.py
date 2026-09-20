@@ -15,6 +15,26 @@ def ok(c, l, e=''):
     else: F += 1; print(f"  FAIL  {l}  {e}")
 
 NOW = IST.localize(datetime(2026, 9, 18, 10, 0))          # a Friday, 10:00 IST
+_REAL_DT = sh.datetime
+
+
+def freeze(when):
+    """Pin spt_selfheal's clock.
+
+    run() reads datetime.now(IST) itself, and returns immediately on a weekend.
+    Without pinning, every assertion below that expects a repair silently
+    became 'weekend, nothing to heal' on a Saturday or Sunday -- the suite
+    passed all week and failed every weekend, which is the worst shape a test
+    can have: it fails when nobody is looking and passes when they are.
+    """
+    class FrozenDT:
+        @staticmethod
+        def now(tz=None): return when
+        fromisoformat = staticmethod(_REAL_DT.fromisoformat)
+    sh.datetime = FrozenDT
+
+
+freeze(NOW)                                               # a weekday, always
 
 def wm(dt):
     return {'last_success': dt.astimezone(timezone.utc).isoformat()}
@@ -63,7 +83,7 @@ ok(repaired == [], "NO repair was attempted while egress was wrong", repaired)
 
 print("\n=== healthy scrape: does nothing, quietly ===")
 fake_run.direct_ip = sh.STATIC_IP
-sh.read_watermark = lambda: wm(datetime.now(IST).replace(hour=9, minute=30))
+sh.read_watermark = lambda: wm(NOW.replace(hour=9, minute=30))
 repaired.clear()
 rc = sh.run()
 ok(rc == 0, "exit 0", rc)
@@ -94,17 +114,11 @@ ok(repaired == [], "no repair attempted", repaired)
 ok(rc == 1, "reports that work is needed", rc)
 
 print("\n=== weekends are skipped ===")
-sat = IST.localize(datetime(2026, 9, 19, 10, 0))
-import datetime as _dt
-_real = sh.datetime
-class FakeDT:
-    @staticmethod
-    def now(tz=None): return sat
-    fromisoformat = staticmethod(_real.fromisoformat)
-sh.datetime = FakeDT
+sat = IST.localize(datetime(2026, 9, 19, 10, 0))          # a Saturday
+freeze(sat)
 repaired.clear()
 ok(sh.run() == 0 and repaired == [], "Saturday: nothing to heal")
-sh.datetime = _real
+freeze(NOW)
 
 print(f"\n{'='*56}\n  {P} passed, {F} failed\n{'='*56}")
 sys.exit(1 if F else 0)

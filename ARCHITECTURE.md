@@ -535,6 +535,7 @@ against realised time-to-target rather than re-derived later.
 | `main_gtt_oracle.py` | **Phase 3** — place GTTs, confirm fills, close trades |
 | `main_conviction.py` | Score today's recommendations; the lite score sets position size |
 | `spt_watchdog.py` | Liveness alarm for the scraper |
+| `spt_selfheal.py` | Repairs the scrape path and re-runs the morning, unattended (§4.6) |
 | `spt_capture.py` | Manual review-then-save of scraped targets |
 | `lib/config.py` | Env/credentials, `KITE_ACCOUNT` switch (NEW/OLD), logging, IST |
 | `lib/email_reader.py` | Gmail IMAP; parses the advisory email into tips |
@@ -553,6 +554,10 @@ against realised time-to-target rather than re-derived later.
 | `dashboard/theme.py` | CSS design system, table and KPI rendering |
 | `tools/recalibrate_bands.py` | Re-derives sizing cutoffs from the current score distribution |
 | `tools/dryrun_sizing.py` | Previews what the buy run would do, with every write tripwired |
+| `tools/md2pdf.py` | Regenerates the committed `README.pdf` / `ARCHITECTURE.pdf` |
+| `provisioning/warp_keeper.sh` | Recycles `warp-svc` before it degrades (§4.4) |
+| `provisioning/sample_warp_memory.sh` | Records `warp-svc` memory every 30 min — the leak-rate evidence |
+| `provisioning/install_crontab.sh` | Installs `provisioning/crontab`; `--check` reports drift |
 | `backtest_conviction.py` | Point-in-time scoring vs realised excess return |
 | `archive/` | Superseded and one-off scripts; nothing scheduled |
 | `bot/` | Multi-tenant variant; keeps its own module copies, not scheduled |
@@ -614,14 +619,29 @@ not — it compares the schedule lines only, so a comment edit is not drift.
 
 The VM clock is **UTC**; IST is UTC+5:30.
 
+Ten entries: seven trading jobs, three maintenance loops.
+
 | Job | Cron (UTC) | IST | Purpose |
 |---|---|---|---|
-| `main_recommend.py` | `0 4 * * 1-5` | 09:30 | Phase 1 |
+| `main_recommend.py` | `0 4 * * 1-5` | 09:30 | Phase 1 — symbols, targets, backfill (§4.6). No orders |
+| `spt_selfheal.py` | `30 4 * * 1-5` | 10:00 | If the 09:30 scrape failed: repair and re-run, before the buy |
 | `main_conviction.py` | `45 4 * * 1-5` | 10:15 | Scoring, lite engine. A failure holds buying |
-| `spt_watchdog.py` | `15 5 * * 1-5` | 10:45 | Liveness alarm |
-| `main.py` | `30 5 * * 1-5` | 11:00 | Phase 2 |
-| `main_gtt_oracle.py` | `30 10 * * 1-5` | 16:00 | Phase 3 |
+| `spt_watchdog.py` | `15 5 * * 1-5` | 10:45 | Pass 1 — are the buy **inputs** ready? |
+| `main.py` | `30 5 * * 1-5` | 11:00 | Phase 2 — price, size, buy |
+| `spt_watchdog.py` | `45 5 * * 1-5` | 11:15 | Pass 2 — did the buy actually **happen**? |
+| `main_gtt_oracle.py` | `30 10 * * 1-5` | 16:00 | Phase 3 — GTTs, confirm fills, close |
+| `warp_keeper.sh` | `*/20 * * * *` | — | Recycle the tunnel before it degrades (§4.4) |
+| `sample_warp_memory.sh` | `*/30 * * * *` | — | Leak-rate evidence |
 | DuckDNS refresh | `*/5 * * * *` | — | Dynamic DNS |
+
+The ordering is the point. Every repair runs **before** the thing it protects:
+self-heal at 10:00 precedes scoring at 10:15, which precedes buying at 11:00.
+A repair that ran after the buy window would be a report, not a recovery.
+
+The watchdog runs twice for the same reason. Everything before 11:00 verifies
+the buy's *inputs*; none of it can see a run that had good inputs and then died
+mid-flight, which still logs "Buy Phase complete". That is how two days of
+buying were lost on 2026-09-01/02.
 
 ---
 
@@ -664,7 +684,9 @@ indistinguishable from an outage and would cry wolf every time.
 | Score changed sharply with no market move | Engine components changed without recalibration | `python3 tools/recalibrate_bands.py` |
 | Login "succeeds", no data | Credentials changed | Substance check should catch it; verify `SPT_USERNAME`/`SPT_PASSWORD` |
 | TCP connects but **nothing responds** on :22 and :443 | Global OOM — userspace wedged, kernel still answering | OCI console → force reboot, then `journalctl -b -1 \| grep -i oom` |
+| Scrape fails, yet `warp-cli status` reads "Connected / Network healthy" | Tunnel **degraded**, not down — the daemon's self-report is wrong | `bash provisioning/warp_keeper.sh --check`, which fetches rather than asks. See §4.4 |
 | `warp-svc` restarting repeatedly | Memory leak hitting its cgroup cap | `systemctl show warp-svc -p MemoryCurrent`; this is the cap working |
+| Trade stuck `PENDING_BUY` for days with a blank `have_interest` | Its scrape failed on the day; retries re-attempt the buy, not the lookup | Fixed by `backfill_missing_interest()` — see §4.6 |
 
 ### 4.3 Safety invariants
 
@@ -724,6 +746,40 @@ workload. If `warp-svc` ever begins restarting frequently, that is the cap
 doing its job — the leak is upstream in Cloudflare's daemon, not in this
 system.
 
+**Containment was necessary but not sufficient, because the daemon degrades
+before it dies.** The cap only acts at 300 MB. On 2026-09-18 `warp-svc` sat at
+230 MB with 1,683 tunnel-disconnect lines in a single day, below the cap and
+therefore never restarted — while `warp-cli status` reported "Connected /
+Network healthy" and the SOCKS proxy returned **HTTP 000** to every request.
+`warp-cli connect` did not help. `systemctl restart warp-svc` did: memory fell
+to 75 MB and the proxy answered 200 in three seconds.
+
+So there is a window, roughly 180–300 MB, in which the tunnel is useless and
+every health signal short of a real request says otherwise:
+
+| Signal | What it actually reports |
+|---|---|
+| `systemctl is-active` | The process exists |
+| `warp-cli status` | What the tunnel *believes* about itself |
+| **A real fetch through the proxy** | Whether the scraper can work |
+
+Only the third is load-bearing, and `warp_keeper.sh` is built on it — it
+restarts when a genuine fetch of the portal fails, or pre-emptively once
+memory reaches **180 MB**, which is inside the degradation window but below
+the cap. Recycling early is cheaper than detecting each failure afterwards.
+
+Measured growth is **~28 MB/day** (61 MB after a restart on 2026-09-18, 73 MB
+ten hours later), so the keeper recycles roughly twice a week and the daemon
+never reaches the state that caused the outage. An earlier note in this
+document put the rate far higher; that figure came from comparing against a
+four-day-old restart and was wrong.
+
+This reframes the incident history. 2026-08-26, 09-04, 09-17 and 09-18 all
+correlate with high `warp-svc` memory. The reconnect-on-failure logic added on
+09-08 was treating a symptom: it succeeded at 09:30 on 09-18 and the tunnel was
+degraded again by that evening. Reconnecting a degraded daemon does not repair
+it — only replacing the process does.
+
 ### 4.5 Two failures worth naming
 
 **Attributing a symbol's holding to one order.** When an order appears in
@@ -777,6 +833,29 @@ an explicit Sell blocks.
 Nothing in the pipeline can close a position, so a signal only a human can act
 on has to reach a human — that is the whole purpose of this status.
 
+### 4.6 A trade that could never recover
+
+A tip whose 09:30 scrape failed was recorded `PENDING_BUY` with a blank
+`have_interest` and held — correctly, since buying without knowing whether the
+call is still live would be worse. The retry logic then re-attempted the
+**buy** every morning, and nothing ever re-attempted the **lookup**: this job
+reads *today's* emails, and a trade held from an earlier day is not in them.
+
+So the missing data could never arrive. Trades #821–824 sat that way from
+2026-09-17, retried daily, reported by the watchdog each morning, until the
+buy window expired and they aged out unbought. The system was neither broken
+nor recovering; it was busy failing in a loop.
+
+`backfill_missing_interest()` closes the gap. The scrape cache already holds
+every live call, so matching a held trade against it costs nothing beyond the
+query. It runs **before** the no-tips early return, because a quiet Monday is
+still a day Friday's held trades should get their data — placed after it, a
+day with no new tips would strand them for another day. It filled 7 of 7 on
+its first live run.
+
+Only blank rows are touched. A recorded "No Interest" is an answer, and must
+never be overwritten by a later lookup that happens to miss.
+
 ---
 
 ## 5. Operations
@@ -791,8 +870,26 @@ git add -A && git commit && git push
 ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
   cd /home/ubuntu/stock_bot_v4 && git pull -q
   cd /home/ubuntu/stockbot     && git pull -q
-  sudo systemctl restart stockbot-dashboard'
+  sudo systemctl restart stockbot-dashboard
+  cd /home/ubuntu/stock_bot_v4 && git status --porcelain'
 ```
+
+That last line is the one that matters. **`git pull` is the only supported
+deploy.** Copying a file with `scp` works, and that is the problem: the VM then
+runs code that exists nowhere else, and `git status` is the only thing that
+says so.
+
+Between 2026-09-08 and 09-19 the VM ran ten days of `scp`-deployed changes
+against a repo whose `HEAD` was from 09-02, because a push was blocked on
+expired credentials and the deploys carried on anyway. Nothing failed. The cost
+was epistemic: there was no way to answer "is production running the fix?"
+without checksumming files by hand, and a single `git checkout .` by anyone
+would have destroyed work that existed on one laptop and one VM.
+
+If the working tree is ever dirty, reconcile it rather than leaving it: back it
+up, compare every dirty file against the commit, and abort if any differs — a
+mismatch means something was edited on the VM that is not in the repo, and that
+is a decision for a human, not a silent overwrite.
 
 ### 5.2 Health check
 
@@ -802,11 +899,20 @@ ssh -i ~/.ssh/kite_key ubuntu@140.245.226.35 '
   curl -s --socks5-hostname 127.0.0.1:40000 ifconfig.me; echo  # must be Cloudflare
   sudo systemctl is-active warp-svc stockbot-dashboard stockbot-capture-api
   free -m                                                      # swap must be non-zero
-  systemctl show warp-svc -p MemoryCurrent                     # ~80MB; cap is 300MB
-  cd /home/ubuntu/stock_bot_v4 && python3 spt_watchdog.py --check-only'
+  cd /home/ubuntu/stock_bot_v4
+  bash provisioning/warp_keeper.sh --check      # fetches; the only real proxy check
+  bash provisioning/install_crontab.sh --check  # schedule drift
+  python3 spt_selfheal.py --check-only          # would it need to repair anything?
+  python3 spt_watchdog.py --check-only          # never sends mail
+  git status --porcelain'                       # MUST be empty — see §5.1
 ```
 
 On a 956 MB VM the memory line is not incidental — see §4.4.
+
+`warp_keeper.sh --check` replaces reading `MemoryCurrent` by eye. It reports
+memory *and* performs a real fetch, and exits non-zero if it would act — which
+is the distinction §4.4 is about, since the daemon calls itself healthy in
+precisely the state that breaks the scraper.
 
 ### 5.3 Testing convention
 
@@ -825,9 +931,13 @@ during development. Commands that move money are handed to the operator to run.
 ## 6. Known limitations
 
 - **WARP is a single point of failure** for the advisory feed, and a consumer
-  service with no availability guarantee. Mitigated, not eliminated: the email
+  service with no availability guarantee. Mitigated, not eliminated:
+  `warp_keeper.sh` recycles the daemon before it degrades, `spt_selfheal.py`
+  repairs and re-runs the morning before the buy window closes, the email
   channel still delivers call headlines, the watchdog surfaces an outage within
   one trading morning, and `spt_capture.py` remains a manual break-glass path.
+  All of that is redundancy around one consumer tunnel, not a second route to
+  the data.
 - **Yahoo Finance is an unofficial source** for fundamentals. Coverage is good
   for this portfolio (all 37 held symbols return 4–5 years of statements) but is
   neither contractual nor audited.

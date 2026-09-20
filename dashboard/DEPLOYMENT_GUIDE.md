@@ -38,13 +38,17 @@ cat > /home/ubuntu/duckdns/duck.sh << 'EOF'
 echo url="https://www.duckdns.org/update?domains=raramdas-stockbot&token=YOUR_DUCKDNS_TOKEN&ip=" | curl -k -o /home/ubuntu/duckdns/duck.log -K -
 EOF
 chmod +x /home/ubuntu/duckdns/duck.sh
-# Run every 5 minutes
-(crontab -l 2>/dev/null; echo "*/5 * * * * /home/ubuntu/duckdns/duck.sh >/dev/null 2>&1") | crontab -
 /home/ubuntu/duckdns/duck.sh   # run once now; should write "OK" to duck.log
 cat /home/ubuntu/duckdns/duck.log
 ```
 
 Replace `raramdas-stockbot` and `YOUR_DUCKDNS_TOKEN` with your actual values.
+
+> **Do not add the cron entry by hand.** The 5-minute refresh is already in
+> [`provisioning/crontab`](../provisioning/crontab), which is the canonical
+> schedule — install it with `bash provisioning/install_crontab.sh`. Appending
+> it with `crontab -` instead would give you the job twice, and
+> `install_crontab.sh --check` would then report drift forever.
 
 ---
 
