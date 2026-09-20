@@ -184,7 +184,7 @@ So **never trust `systemctl is-active` or `warp-cli status` here.** They report
 that a process exists and what the tunnel believes; neither answers whether the
 scraper can fetch. `warp_keeper.sh` asks the only question that matters by
 making a real request, and recycles at 180 MB — inside the degradation window,
-below the cap. At ~28 MB/day that is roughly twice a week.
+below the cap. At the measured ~32 MB/day that is roughly every four days.
 
 **If the first command ever returns a Cloudflare address, stop.** The scraper's
 proxy has escaped its scope and broker traffic is no longer leaving from the

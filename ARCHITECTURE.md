@@ -768,11 +768,16 @@ restarts when a genuine fetch of the portal fails, or pre-emptively once
 memory reaches **180 MB**, which is inside the degradation window but below
 the cap. Recycling early is cheaper than detecting each failure afterwards.
 
-Measured growth is **~28 MB/day** (61 MB after a restart on 2026-09-18, 73 MB
-ten hours later), so the keeper recycles roughly twice a week and the daemon
-never reaches the state that caused the outage. An earlier note in this
-document put the rate far higher; that figure came from comparing against a
-four-day-old restart and was wrong.
+Measured growth is **~32 MB/day**: 61 MB after a restart on 2026-09-18, then
+73 MB at ten hours and 110 MB at thirty-seven. So the keeper recycles roughly
+every four days and the daemon never reaches the state that caused the outage.
+
+Two earlier figures in this document were wrong, in opposite directions, and
+both for the same reason — a window too short or too dirty to extrapolate
+from. The first compared against a four-day-old restart and was far too high;
+the second read ~28 MB/day off a single ten-hour window. Quote this number
+with the window it came from, and re-derive it from
+`provisioning/sample_warp_memory.sh` rather than from two points.
 
 This reframes the incident history. 2026-08-26, 09-04, 09-17 and 09-18 all
 correlate with high `warp-svc` memory. The reconnect-on-failure logic added on
