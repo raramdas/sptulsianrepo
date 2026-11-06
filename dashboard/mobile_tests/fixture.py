@@ -14,7 +14,25 @@ def sample():
 class FixtureStore:
     def __init__(self):
         self.data=sample();self.writes=[]
+        self.data['trades'].append(dict(trade_id=99,stock_name='Voltamp Transformers',symbol='VOLTAMP',category_name='Big Gems',status='NEEDS_REVIEW',buy_date='2026-11-06',notes='Confirm exact company symbol',my_buy_qty=None,target_price=None))
     def snapshot(self): return deepcopy(self.data)
     def refresh(self): return {'NEW': {'holdings':5},'OLD':{'holdings':0}}
     def target(self,tid,body): self.writes.append(('target',tid,body))
     def budget(self,body): self.writes.append(('budget',body))
+
+# Methods used by the restored workflows. Synthetic data only.
+def _symbol_preview(self, tid, symbol):
+    return dict(trade_id=tid,stock_name='Voltamp Transformers',category='Big Gems',symbol=symbol.upper(),company_name='VOLTAMP TRANSFORMERS',exchange='NSE',cap_type='Small Cap',recommended_price=7800)
+def _symbol_confirm(self, preview):
+    self.writes.append(('symbol',preview))
+    for t in self.data['trades']:
+        if t['trade_id']==preview['trade_id']:t['status']='PENDING_BUY';t['symbol']=preview['symbol']
+def _classification(self,q):return [dict(company_name='Voltamp Transformers',symbol='VOLTAMP',cap_type='Small Cap',amfi_rank=350,source_period='2026-H1')]
+def _evidence(self,tid):return [dict(score=80,model='lite',scored_at='2026-11-06T10:00:00+05:30',evidence_pct=75,verdict='ACCEPT',reasons='[]',warnings='["Check earnings update"]',layers_json='{}')]
+def _reconcile(self):
+    return dict(observed_at='2026-11-06T10:00:00+05:30',accounts={'NEW':{'holdings':1,'active_sell_gtts':0}},rows=[dict(account='NEW',symbol='TEST',held=10,t1=0,reserved=0,uncovered=10,flags=['MISSING_GTT_COVERAGE'],candidate_lots=[dict(trade_id=1,quantity=10,target_price=120,state='EXISTING_TARGET_CANDIDATE')],target_missing_qty=0,triggers=[])],ledger_only=[])
+FixtureStore.symbol_preview=_symbol_preview
+FixtureStore.symbol_confirm=_symbol_confirm
+FixtureStore.classification=_classification
+FixtureStore.evidence=_evidence
+FixtureStore.reconcile=_reconcile

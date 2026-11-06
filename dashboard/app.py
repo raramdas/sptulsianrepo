@@ -950,7 +950,8 @@ def main():
 
     st.sidebar.markdown("## Capital Ledger")
     st.sidebar.caption(f"Signed in as **{st.session_state.get('user')}**")
-    page = st.sidebar.radio("Navigate", PAGES, label_visibility="collapsed")
+    requested_page = st.query_params.get("page", "Overview")
+    page = st.sidebar.radio("Navigate", PAGES, index=PAGES.index(requested_page) if requested_page in PAGES else 0, label_visibility="collapsed")
     if st.sidebar.button("Sign out"):
         st.session_state.clear()
         if 'user' in cookies:
