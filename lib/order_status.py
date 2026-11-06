@@ -118,6 +118,10 @@ def find_sell_order_for_symbol(symbol, qty, enctoken, min_price=None, exclude_or
         'filled_qty': int(o.get('filled_quantity', 0)),
         'avg_price':  float(o.get('average_price', 0) or 0),
         'symbol':     o.get('tradingsymbol', ''),
+        'transaction_type': o.get('transaction_type'),
+        'product': o.get('product'),
+        'exchange': o.get('exchange'),
+        'order_timestamp': o.get('order_timestamp'),
         'order_id':   str(o.get('order_id', '')),
     }
 
@@ -148,6 +152,10 @@ def get_order_status(order_id, enctoken, symbol_hint=None,
                 'filled_qty': int(o.get('filled_quantity', 0)),
                 'avg_price':  float(o.get('average_price', 0) or 0),
                 'symbol':     o.get('tradingsymbol', ''),
+                'transaction_type': o.get('transaction_type'),
+                'product': o.get('product'),
+                'exchange': o.get('exchange'),
+                'order_timestamp': o.get('order_timestamp'),
             }
         else:
             log(f"  Order {order_id} not found in today's orders — checking order history")
@@ -160,6 +168,10 @@ def get_order_status(order_id, enctoken, symbol_hint=None,
                     'filled_qty': int(o.get('filled_quantity', 0)),
                     'avg_price':  float(o.get('average_price', 0) or 0),
                     'symbol':     o.get('tradingsymbol', ''),
+                    'transaction_type': o.get('transaction_type'),
+                    'product': o.get('product'),
+                    'exchange': o.get('exchange'),
+                    'order_timestamp': o.get('order_timestamp'),
                 }
             # Fallback: infer a previous-day fill from holdings.
             #

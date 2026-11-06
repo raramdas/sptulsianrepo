@@ -11,6 +11,7 @@ file the 11:00 AM cron job calls. Run directly:
     python3 main.py
 """
 import math
+from lib.trading_safety import safe_buy_retry, positive
 from datetime import datetime
 
 from lib.config import (log, DRY_RUN, IST, INVEST_AMT, CONVICTION_SIZING,
@@ -82,6 +83,12 @@ def decide_position_size(trade):
         # IS a judgement, and re-running tomorrow will not conjure evidence.
         return None, (f"Conviction withheld ({conv.get('verdict')}, evidence "
                       f"{conv.get('evidence_pct')}/100) — too little evidence to size"), False
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return None, 'Invalid conviction score — review required', True
+    if not math.isfinite(score) or not 0 <= score <= 100:
+        return None, 'Invalid conviction score — review required', True
     if score < CONVICTION_MIN_SCORE:
         return None, (f'Conviction {score:.1f} is below the '
                       f'{CONVICTION_MIN_SCORE}-point floor'), False
@@ -107,6 +114,9 @@ def attempt_buy(trade, enctoken):
 
     invest_amt, skip_reason, retryable = decide_position_size(trade)
     if skip_reason:
+        if DRY_RUN:
+            log(f"[DRY RUN] Would hold/skip {stock}: {skip_reason}")
+            return
         # An outage is not a verdict. When the pipeline simply had no data,
         # leave the trade queued so a later run can buy it once the data
         # arrives — rather than burning the opportunity on our own downtime.
@@ -128,7 +138,11 @@ def attempt_buy(trade, enctoken):
     sizing_src = "by conviction" if CONVICTION_SIZING_ENABLED else "flat"
     log(f"  Position size Rs.{invest_amt:,} ({sizing_src})")
 
+    if not positive(email_price):
+        raise ValueError('Invalid recommendation price')
     mkt_price = get_market_price(stock, enctoken, kite_symbol=symbol)
+    if mkt_price is not None and not positive(mkt_price):
+        raise ValueError('Invalid market price')
     log(f"{stock} email:{email_price} market:{mkt_price}")
     if mkt_price and mkt_price < email_price:
         buy_price, order_type = mkt_price, 'MARKET'
@@ -153,6 +167,8 @@ def attempt_buy(trade, enctoken):
     budget_ok, category_id = check_budget_available(category, cap_type, actual_cost, symbol=symbol)
     if not budget_ok:
         log(f"SKIPPING {stock} — insufficient budget for actual cost Rs.{actual_cost:,.2f}")
+        if DRY_RUN:
+            return
         sheet_tip['note'] = 'Insufficient category/stock-type budget'
         log_to_sheet(sheet_tip)
         update_trade_after_buy_attempt(trade_id, 'SKIPPED', category_id=category_id, symbol=symbol,
@@ -163,6 +179,7 @@ def attempt_buy(trade, enctoken):
         buy_order_id = 'DRY_RUN'
         sheet_tip['note'] = 'DRY RUN'
         log(f"[DRY RUN] Would BUY {qty} x {stock} @ {buy_price}")
+        return
     else:
         buy = kite_buy(sheet_tip, enctoken)
         buy_order_id = buy['order_id']
@@ -183,7 +200,10 @@ def attempt_buy(trade, enctoken):
     # sit in PENDING_FILL and are reconciled on a later run.
     if not DRY_RUN:
         filled = get_order_status(buy_order_id, enctoken, symbol_hint=symbol)
-        if not (filled and filled['status'] == 'COMPLETE' and filled['filled_qty'] > 0):
+        if not (filled and filled['status'] == 'COMPLETE' and filled['filled_qty'] > 0
+                and filled.get('symbol') == symbol and filled.get('transaction_type') == 'BUY'
+                and filled.get('product') == 'CNC' and not filled.get('from_holdings')
+                and positive(filled.get('avg_price'))):
             state = (filled or {}).get('status', 'UNKNOWN')
             log(f"  Not filled yet (order status {state}) — holding as PENDING_FILL")
             update_trade_after_buy_attempt(
@@ -194,7 +214,7 @@ def attempt_buy(trade, enctoken):
             return
         # Use what actually filled, not what we asked for.
         qty = filled['filled_qty']
-        buy_price = filled.get('avg_price') or buy_price
+        buy_price = filled['avg_price']
         actual_cost = qty * buy_price
         log(f"  Filled: {qty} @ {buy_price} (Rs.{actual_cost:,.2f})")
 
@@ -218,6 +238,9 @@ def reconcile_pending_fills(enctoken):
     This is what makes "retry for the next 2 days" real: a call whose price
     never came back today gets another chance tomorrow instead of being lost.
     """
+    if DRY_RUN:
+        log("[DRY RUN] Pending-fill reconciliation left unchanged")
+        return
     pending = get_pending_fill_trades()
     if not pending:
         return
@@ -243,14 +266,21 @@ def reconcile_pending_fills(enctoken):
         status = (info or {}).get('status', 'UNKNOWN')
         filled_qty = (info or {}).get('filled_qty') or 0
 
-        if info and status == 'COMPLETE' and filled_qty > 0:
-            price = info.get('avg_price') or float(t['recommended_price'])
+        if (info and status == 'COMPLETE' and filled_qty > 0
+                and not info.get('from_holdings') and info.get('symbol') == symbol
+                and info.get('transaction_type') == 'BUY' and info.get('product') == 'CNC'
+                and positive(info.get('avg_price'))):
+            price = info['avg_price']
             cost = filled_qty * price
             log(f"  #{trade_id} {stock}: FILLED {filled_qty} @ {price} — marking Open")
             update_trade_after_buy_attempt(
                 trade_id, 'Open', symbol=symbol, my_buy_price=price,
                 my_buy_qty=filled_qty, invested_amount=cost,
                 notes=f'Filled on attempt {attempts}')
+            continue
+
+        if not safe_buy_retry(info):
+            log(f"  #{trade_id} {stock}: order {status}; unresolved/partial fill, keeping PENDING_FILL")
             continue
 
         if attempts <= BUY_RETRY_DAYS:
@@ -331,7 +361,8 @@ def run():
             attempt_buy(trade, enctoken)
         except Exception as e:
             log(f"ERROR {trade['stock_name']}: {e}")
-            update_trade_after_buy_attempt(trade['trade_id'], 'ERROR', notes=str(e))
+            if not DRY_RUN:
+                update_trade_after_buy_attempt(trade['trade_id'], 'ERROR', notes=str(e))
 
     _log_gate_summary(to_buy)
     close_oracle_connection()

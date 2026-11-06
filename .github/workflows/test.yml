@@ -23,6 +23,9 @@ jobs:
           python3 test_dashboard_logic.py
           python3 test_write_operations.py
 
+      - name: Trading safety regression tests (offline, broker write tripwires)
+        run: python3 tests/test_trading_safety.py
+
       - name: Syntax-check all Python files
         run: |
           find . -name "*.py" -exec python3 -m py_compile {} +
