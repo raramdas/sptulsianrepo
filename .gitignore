@@ -35,3 +35,11 @@ Thumbs.db
 .local_secrets/
 
 .venv/
+.venv-research/
+
+# Private research snapshots, price caches, databases and generated live reports
+research/private/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
