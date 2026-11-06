@@ -9,7 +9,9 @@ Test independently:
     python3 -c "from budget_manager import check_budget_available; print(check_budget_available('Big Gems', 'Large Cap', 5000))"
 """
 from datetime import datetime
+import math
 import oracledb
+from lib.bands import SIZING_MODEL
 
 from lib.config import (
     log, IST, ORACLE_USER, ORACLE_PASSWORD, ORACLE_DSN,
@@ -139,22 +141,32 @@ def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
     Systems and Zee Ent — each individually nowhere near its own 2% cap —
     just because OTHER Micro Cap stocks had used up the shared bucket.)
 
-    If cap_type or symbol is unknown, only the category budget is checked
-    (fallback). If Oracle is unreachable, fails open (allows the trade) so
-    the buy bot isn't blocked entirely by a DB outage.
+    Unknown classification, unavailable Oracle, or unresolved pending orders
+    block new spending until the budget can be verified.
     """
+    from lib.trading_safety import positive
+    if not positive(invest_amt) or not symbol or cap_type not in ('Large Cap', 'Mid Cap', 'Small Cap', 'Micro Cap'):
+        return False, None
     conn = get_oracle_connection()
     if not conn:
-        log("  Budget check: no Oracle connection — allowing trade (fail-open)")
-        return True, None
+        log("  Budget check: no Oracle connection — blocking trade (fail-closed)")
+        return False, None
 
     category_id = get_category_id(category_name)
     if not category_id:
-        log(f"  Budget check: category '{category_name}' not found in Oracle — allowing trade (fail-open)")
-        return True, None
+        log(f"  Budget check: category '{category_name}' not found in Oracle — blocking trade (fail-closed)")
+        return False, None
 
     try:
         cursor = conn.cursor()
+
+        # Legacy pending orders have no reliable reserved cost. Hold the
+        # category until they reconcile instead of spending their budget twice.
+        cursor.execute("SELECT COUNT(*) FROM trades WHERE category_name = :name AND status = 'PENDING_FILL'",
+                       {'name': category_name})
+        if cursor.fetchone()[0]:
+            cursor.close()
+            return False, category_id
 
         # 1. Category-level available budget
         cursor.execute("""
@@ -163,7 +175,7 @@ def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
         row = cursor.fetchone()
         category_available = float(row[0]) if row else 0
 
-        if category_available < invest_amt:
+        if not math.isfinite(category_available) or category_available < invest_amt:
             log(f"  Budget check: category '{category_name}' available Rs.{category_available:,.2f} "
                 f"< needed Rs.{invest_amt:,.2f} — SKIP")
             cursor.close()
@@ -194,7 +206,7 @@ def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
             already_invested = float(cursor.fetchone()[0])
             stock_available = max_position - already_invested
 
-            if stock_available < invest_amt:
+            if not all(math.isfinite(v) for v in (pct, total_budget, already_invested, stock_available)) or stock_available < invest_amt:
                 log(f"  Budget check: {symbol} ({cap_type}) position cap Rs.{max_position:,.2f}, already "
                     f"invested Rs.{already_invested:,.2f}, available Rs.{stock_available:,.2f} "
                     f"< needed Rs.{invest_amt:,.2f} — SKIP")
@@ -208,8 +220,8 @@ def check_budget_available(category_name, cap_type, invest_amt, symbol=None):
         return True, category_id
 
     except Exception as e:
-        log(f"  Budget check error: {e} — allowing trade (fail-open)")
-        return True, category_id
+        log(f"  Budget check error: {e} — blocking trade (fail-closed)")
+        return False, category_id
 
 
 def update_trade_advisory_data(trade_id, have_interest, target_price=None, timeframe=''):
@@ -713,8 +725,8 @@ def get_latest_conviction(trade_id):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT score, verdict, evidence_pct FROM conviction_scores
-            WHERE trade_id = :id ORDER BY score_id DESC FETCH FIRST 1 ROWS ONLY
-        """, {'id': trade_id})
+            WHERE trade_id = :id AND model = :model ORDER BY score_id DESC FETCH FIRST 1 ROWS ONLY
+        """, {'id': trade_id, 'model': SIZING_MODEL})
         row = cursor.fetchone()
         cursor.close()
         if not row:
@@ -872,7 +884,7 @@ def mark_gtt_failure_oracle(trade_id, message):
         cursor.execute("""
             UPDATE trades SET notes = :msg, updated_at = SYSTIMESTAMP
             WHERE trade_id = :id
-        """, {'msg': f'GTT placement retry pending — {message}', 'id': trade_id})
+        """, {'msg': f'GTT review — {message}', 'id': trade_id})
         conn.commit()
         cursor.close()
     except Exception as e:
@@ -880,44 +892,33 @@ def mark_gtt_failure_oracle(trade_id, message):
 
 
 def close_trade_in_oracle(buy_order_id, target_met_date, sell_price=None, sell_qty=None):
-    """Mark a trade as Closed in Oracle when its GTT triggers — this frees up
-    the category/stock-type budget since the views only sum status='Open'.
-
-    sell_price/sell_qty (from the confirmed fill main_gtt_oracle.py already
-    verified before calling this) are recorded too, with my_gain_loss
-    computed against the trade's own my_buy_price. Without these, the row
-    closes with status='Closed' but every sell-side figure stays NULL —
-    which is what happened before 2026-08-08: trades correctly closed
-    (budget freed up) but Performance's realized P&L and cumulative chart
-    had nothing to work with, since both key off my_sell_date/my_gain_loss."""
+    """Close exactly one fully matched lot; never release unverified capital."""
+    from lib.trading_safety import positive
+    if not buy_order_id or not positive(sell_price) or not positive(sell_qty):
+        raise ValueError('Exact confirmed sell price and quantity required')
     conn = get_oracle_connection()
     if not conn:
-        log("  Oracle close skipped — no connection")
-        return
+        raise RuntimeError('Oracle unavailable; sell remains unreconciled')
+    cursor = conn.cursor()
     try:
-        cursor = conn.cursor()
-        if sell_price is not None and sell_qty is not None:
-            cursor.execute("""
-                UPDATE trades
-                SET status = 'Closed', target_met = 'Yes', target_met_date = :target_met_date,
-                    my_sell_date = :target_met_date, my_sell_price = :sell_price, my_sell_qty = :sell_qty,
-                    my_gain_loss = (:sell_price - my_buy_price) * :sell_qty,
-                    updated_at = SYSTIMESTAMP
-                WHERE buy_order_id = :buy_order_id AND status = 'Open'
-            """, {'buy_order_id': buy_order_id, 'target_met_date': target_met_date,
-                  'sell_price': sell_price, 'sell_qty': sell_qty})
-        else:
-            cursor.execute("""
-                UPDATE trades
-                SET status = 'Closed', target_met = 'Yes', target_met_date = :target_met_date,
-                    updated_at = SYSTIMESTAMP
-                WHERE buy_order_id = :buy_order_id AND status = 'Open'
-            """, {'buy_order_id': buy_order_id, 'target_met_date': target_met_date})
+        cursor.execute("""
+            UPDATE trades
+            SET status = 'Closed', target_met = 'Yes', target_met_date = :target_met_date,
+                my_sell_date = :target_met_date, my_sell_price = :sell_price, my_sell_qty = :sell_qty,
+                my_gain_loss = (:sell_price - my_buy_price) * :sell_qty,
+                updated_at = SYSTIMESTAMP
+            WHERE buy_order_id = :buy_order_id AND status = 'Open' AND my_buy_qty = :sell_qty
+              AND gtt_id NOT IN (SELECT gtt_id FROM trades WHERE status = 'Closed' AND gtt_id IS NOT NULL)
+        """, {'buy_order_id': buy_order_id, 'target_met_date': target_met_date,
+              'sell_price': sell_price, 'sell_qty': sell_qty})
+        if cursor.rowcount != 1:
+            raise ValueError('Sell did not identify exactly one complete open lot')
         conn.commit()
-        log(f"  Oracle trade closed for buy_order_id={buy_order_id} (rows updated: {cursor.rowcount})")
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
         cursor.close()
-    except Exception as e:
-        log(f"  Oracle close error: {e}")
 
 
 if __name__ == '__main__':

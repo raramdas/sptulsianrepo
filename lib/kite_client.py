@@ -273,28 +273,25 @@ def kite_buy(tip, enctoken):
 
 
 def place_gtt(symbol, qty, target_price, last_price, enctoken):
-    """Place a single-trigger GTT sell order.
-    trigger_price = Rs 0.10 below target, ROUNDED DOWN to the instrument's
-    own tick size (0.05/0.10/1.00/5.00 etc — varies per stock, NOT a flat
-    NSE-wide constant). Kite requires the trigger to be an EXACT multiple
-    of that tick size — this was previously missing entirely, which is
-    exactly what caused "Trigger price should be a multiple of tick size
-    X" errors across roughly half of a batch of reconciliation GTTs.
-    limit sell price = target_price, rounded UP to the same tick size (so
-    it's never below the tick-floored trigger).
+    """Place a delivery target only against fresh, unreserved broker holdings."""
+    from lib.trading_safety import available_delivery_quantity, validate_sell_request
 
-    Kite ALSO requires last_price to differ from trigger_price by MORE
-    THAN 0.25% (and, for a sell GTT, last_price must be below trigger_price),
-    subject to an absolute floor of about Rs 0.09. PASS THE REAL LAST PRICE:
-    callers that pass None force the synthetic fallback below, which is
-    strictly worse than the truth and has its own failure mode.
+    def snapshot(endpoint):
+        response = requests.get(f'{OMS_BASE}/{endpoint}',
+                                headers=kite_headers(enctoken), timeout=20)
+        response.raise_for_status()
+        body = response.json()
+        if body.get('status') != 'success' or 'data' not in body:
+            raise ValueError(f'Cannot verify broker {endpoint}; refusing GTT')
+        return body['data']
 
-    The percentage margin alone is not enough on cheap stocks. At a trigger
-    of Rs 15.09 (Vodafone Idea), 0.5% is Rs 0.08 — under Kite's ~0.09 floor —
-    so the request was rejected as "too close" even though the real market
-    price was Rs 1.02 away and would have been accepted. Any stock priced
-    under roughly Rs 17 hit this. Hence MIN_GAP_ABS.
-    """
+    holdings = snapshot('portfolio/holdings')
+    positions = snapshot('portfolio/positions')['net']
+    gtts = snapshot('gtt/triggers')
+    current_orders = snapshot('orders')
+    if not all(isinstance(rows, list) for rows in (holdings, positions, gtts, current_orders)):
+        raise ValueError('Incomplete broker inventory response')
+    available = available_delivery_quantity(symbol, EXCHANGE, holdings, positions, gtts, current_orders)
     tick_size = get_tick_size(symbol)
     GTT_OFFSET = 0.10
     MIN_GAP_ABS = 0.15   # comfortably above Kite's ~0.09 absolute floor
@@ -303,11 +300,7 @@ def place_gtt(symbol, qty, target_price, last_price, enctoken):
 
     # 0.5% margin (above Kite's 0.25% rule) but never below the absolute floor.
     min_gap = max(round(trigger_price * 0.005, 2), MIN_GAP_ABS)
-    if not last_price or (trigger_price - last_price) < min_gap:
-        original = last_price
-        last_price = round(trigger_price - min_gap, 2)
-        log(f"  Adjusted last_price from {original} to {last_price} "
-            f"(need a >{min_gap} gap below trigger {trigger_price})")
+    validate_sell_request(qty, trigger_price, last_price, available)
     log(f"  GTT: tick_size={tick_size} trigger={trigger_price} limit={limit_price} last_price={last_price}")
     orders = json.dumps([{
         'exchange': EXCHANGE, 'tradingsymbol': symbol,

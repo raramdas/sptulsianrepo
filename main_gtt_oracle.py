@@ -16,12 +16,13 @@ your cron job to this script only.
 Run directly:
     python3 main_gtt_oracle.py
 """
-import re
 from datetime import datetime, timedelta
 
 from lib.config import log, GTT_DRY_RUN, IST
 from lib.kite_client import get_enctoken, place_gtt, get_gtt_detail, get_market_price
-from lib.order_status import get_order_status, find_sell_order_for_symbol
+from lib.order_status import get_order_status
+from lib.trading_safety import confirmed_sell
+from lib.config import EXCHANGE
 from lib.budget_manager import (
     get_open_trades_with_target, get_open_trades_with_gtt,
     set_gtt_placed_oracle, mark_trade_error_oracle, mark_gtt_failure_oracle,
@@ -74,21 +75,23 @@ def run():
             log(f"  Capping GTT qty from holdings {filled_qty} to recorded buy qty {sheet_qty}")
             filled_qty = int(sheet_qty)
 
-        if kite_status == 'COMPLETE' and filled_qty > 0:
+        if (kite_status == 'COMPLETE' and filled_qty > 0
+                and not order_info.get('from_holdings')
+                and order_info.get('symbol') == symbol
+                and order_info.get('transaction_type') == 'BUY'
+                and order_info.get('product') == 'CNC'
+                and sheet_qty is not None and float(sheet_qty) == filled_qty):
             if not kite_symbol:
                 log("  ERROR: symbol is empty — skipping GTT")
                 gtt_skipped += 1
                 continue
             if GTT_DRY_RUN:
                 log(f"  [DRY RUN] Would place GTT SELL {filled_qty} x {kite_symbol} @ {target}")
-                set_gtt_placed_oracle(trade_id, 'DRY_RUN', dry_run=True)
                 gtt_placed += 1
             else:
                 try:
-                    # Pass the REAL last price. Passing None makes place_gtt
-                    # synthesise one just below its own trigger, which Kite
-                    # rejects as "too close" on cheap stocks even when the
-                    # actual market price is nowhere near the target.
+                    # place_gtt verifies fresh holdings and rejects missing
+                    # prices or targets already crossed by the market.
                     ltp = get_market_price(stock, enctoken, kite_symbol=kite_symbol)
                     gtt_id = place_gtt(kite_symbol, filled_qty, target, ltp, enctoken)
                     log(f"  GTT placed: {gtt_id}")
@@ -108,7 +111,7 @@ def run():
             log("  Limit order still open — skipping GTT")
             gtt_skipped += 1
 
-        elif kite_status in ('REJECTED', 'CANCELLED'):
+        elif kite_status in ('REJECTED', 'CANCELLED') and filled_qty == 0:
             if GTT_DRY_RUN:
                 log(f"  [DRY RUN] Order {kite_status} — would mark ERROR")
             else:
@@ -120,14 +123,8 @@ def run():
             log(f"  Unknown status {kite_status} — skipping")
             gtt_skipped += 1
 
-    # ── Phase 2: check existing GTTs. A GTT can leave 'active' state three
-    # ways: it triggered AND the sell filled (real close), it triggered but
-    # the DAY-validity sell order never filled, or it was cancelled outright.
-    # Only the first case should close the row — the other two mean nothing
-    # was actually sold, and get a fresh GTT at the same target instead of
-    # silently sitting there. (Ported from main_gtt.py's Phase 2, which had
-    # this check; this script originally didn't and would have wrongly
-    # closed+recycled the budget for any GTT that triggered without a fill.)
+    # Phase 2: reconcile only exact linked fills. Unconfirmed terminal
+    # triggers require review, not automatic replacement.
     active_gtts = get_open_trades_with_gtt()
     log(f"Checking {len(active_gtts)} active GTT(s) for triggers")
 
@@ -141,9 +138,7 @@ def run():
         symbol   = t['symbol']
         gtt_id   = t['gtt_id']
         buy_oid  = t['buy_order_id']
-        target   = t.get('target_price')
         my_qty   = t.get('my_buy_qty')
-        notes    = t.get('notes') or ''
 
         detail = get_gtt_detail(gtt_id, enctoken)
         if not detail:
@@ -177,23 +172,16 @@ def run():
                 if filled_order:
                     filled_order.setdefault('order_id', oid)
                 break
-        if not filled_order and qty and sell_symbol:
-            # Guarded fallback: the fill must be at or above THIS trade's own
-            # limit, and must not already have closed another lot.
-            filled_order = find_sell_order_for_symbol(
-                sell_symbol, qty, enctoken,
-                min_price=target,
-                exclude_order_ids=consumed_sell_orders)
-
-        sold_ok = bool(filled_order and filled_order['status'] == 'COMPLETE'
-                        and filled_order['filled_qty'] > 0)
+        # Only the order explicitly linked by this GTT may close this lot.
+        sold_ok = confirmed_sell(filled_order, sell_symbol, qty, EXCHANGE)
 
         if sold_ok:
             if GTT_DRY_RUN:
                 log(f"  [DRY RUN] Would mark {stock} as Closed — sold "
                     f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")
             else:
-                close_trade_in_oracle(buy_oid, datetime.now(IST).date(),
+                close_trade_in_oracle(buy_oid,
+                                      datetime.fromisoformat(str(filled_order["order_timestamp"])).date(),
                                       sell_price=filled_order.get('avg_price'),
                                       sell_qty=filled_order['filled_qty'])
             if filled_order.get('order_id'):
@@ -202,29 +190,15 @@ def run():
             log(f"  {stock} marked Closed — GTT {gtt_st}, sell CONFIRMED filled "
                 f"{filled_order['filled_qty']} @ {filled_order.get('avg_price')}")
         else:
-            # GTT ended (triggered without a fill, cancelled, deleted, or
-            # expired) with nothing actually sold — recreate at the same
-            # target price rather than leaving this to be redone by hand.
-            if not qty or not target or not sell_symbol:
-                log(f"  Cannot recreate GTT for trade #{trade_id} — missing qty/target/symbol")
-                gtt_skipped += 1
-                continue
-            m = re.search(r'Retry #(\d+)', notes)
-            new_retry = int(m.group(1)) + 1 if m else 1
-            note = f'Retry #{new_retry}: GTT {gtt_st.lower()} without a confirmed fill'
-            log(f"  GTT {gtt_st} with NO confirmed sell — recreating ({note})")
-            if GTT_DRY_RUN:
-                log(f"  [DRY RUN] Would recreate GTT SELL {qty} x {sell_symbol} @ {target}")
-            else:
-                try:
-                    ltp = get_market_price(stock, enctoken, kite_symbol=sell_symbol)
-                    new_gtt_id = place_gtt(sell_symbol, qty, float(target), ltp, enctoken)
-                    set_gtt_placed_oracle(trade_id, new_gtt_id, note=note)
-                    log(f"  New GTT placed: {new_gtt_id}")
-                except Exception as e:
-                    log(f"  GTT recreate error: {e}")
-                    mark_trade_error_oracle(trade_id, str(e))
-            gtt_recreated += 1
+            # Terminal GTT != failed sell. History may be missing, partially
+            # filled, or still open. Never recreate automatically from absence
+            # of a confirmed fill (the Solar daily-trigger failure mode).
+            log(f"  REVIEW REQUIRED: trade #{trade_id}; GTT {gtt_st}, "
+                "no exact linked complete sell. Automatic recreation disabled.")
+            if not GTT_DRY_RUN:
+                mark_gtt_failure_oracle(trade_id,
+                    f'Review required: GTT {gtt_st}; no exact linked complete sell; no auto retry')
+            gtt_skipped += 1
 
     close_oracle_connection()
     log(f"=== GTT Automation (Oracle) complete | Placed: {gtt_placed} | "
