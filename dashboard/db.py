@@ -134,7 +134,7 @@ def trades(status=None, category=None, symbol=None, date_from=None, date_to=None
         SELECT t.trade_id, t.category_name, t.stock_name, t.symbol, t.stock_type,
                t.buy_date, t.status, t.order_type, t.my_buy_price, t.my_buy_qty,
                t.invested_amount, t.target_price, t.gtt_id, t.gtt_status,
-               t.my_sell_date, t.my_sell_price, t.my_gain_loss, t.notes,
+               t.my_sell_date, t.my_sell_price, t.my_gain_loss, t.notes, t.have_interest, t.timeframe,
                c.score AS conviction, c.tier AS conviction_tier,
                c.verdict AS conviction_verdict, c.model AS conviction_model
         FROM trades t

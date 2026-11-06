@@ -1,0 +1,13 @@
+raramdas-stockbot.duckdns.org {
+    handle /api/spt-capture/* {
+        reverse_proxy localhost:8600
+    }
+    redir /classic /classic/ permanent
+    handle /classic/* {
+        reverse_proxy localhost:8501
+    }
+    handle {
+        reverse_proxy localhost:8502
+    }
+    encode gzip
+}
