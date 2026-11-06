@@ -26,3 +26,6 @@ jobs:
       - name: Syntax-check all Python files
         run: |
           find . -name "*.py" -exec python3 -m py_compile {} +
+
+      - name: Historical evidence tests (offline; no trading imports)
+        run: python3 -m unittest discover -s tests/research -v
