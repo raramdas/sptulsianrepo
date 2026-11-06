@@ -35,3 +35,7 @@ Thumbs.db
 .local_secrets/
 
 .venv/
+
+# Private mobile sessions and browser QA outputs
+*.sqlite3
+mobile-preview/

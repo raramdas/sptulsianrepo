@@ -26,6 +26,11 @@ jobs:
       - name: Trading safety regression tests (offline, broker write tripwires)
         run: python3 tests/test_trading_safety.py
 
+      - name: Mobile app authentication and data tests
+        run: |
+          pip install -r dashboard/mobile-requirements.txt httpx python-dotenv
+          python3 dashboard/mobile_tests/test_app.py
+
       - name: Syntax-check all Python files
         run: |
           find . -name "*.py" -exec python3 -m py_compile {} +
