@@ -82,6 +82,29 @@ class MobileTests(unittest.TestCase):
         conn.cursor.return_value.rowcount=2
         with self.assertRaises(Exception):store.budget(Budget(amount=100,expected_amount=50))
         conn.commit.assert_not_called();conn.rollback.assert_called_once()
+    def test_symbol_preview_is_read_only_and_confirm_is_bound(self):
+        csrf=self.login().json()['csrf'];headers={'X-CSRF-Token':csrf}
+        r=self.client.post('/api/trades/99/symbol-preview',json={'symbol':'VOLTAMP'},headers=headers)
+        self.assertEqual(r.status_code,200);self.assertFalse(self.store.writes)
+        token=r.json()['preview_token']
+        self.assertEqual(self.client.post('/api/trades/98/symbol-confirm',json={'preview_token':token},headers=headers).status_code,409)
+        self.assertEqual(self.client.post('/api/trades/99/symbol-confirm',json={'preview_token':token+'x'},headers=headers).status_code,409)
+        self.assertEqual(self.client.post('/api/trades/99/symbol-confirm',json={'preview_token':token}).status_code,403)
+        self.assertFalse(self.store.writes)
+        self.assertEqual(self.client.post('/api/trades/99/symbol-confirm',json={'preview_token':token},headers=headers).status_code,200)
+        self.assertEqual(self.store.writes[0][0],'symbol')
+    def test_other_sessions_cannot_confirm_symbol_preview(self):
+        csrf=self.login().json()['csrf'];r=self.client.post('/api/trades/99/symbol-preview',json={'symbol':'VOLTAMP'},headers={'X-CSRF-Token':csrf})
+        token=r.json()['preview_token'];new_csrf=self.login().json()['csrf']
+        self.assertEqual(self.client.post('/api/trades/99/symbol-confirm',json={'preview_token':token},headers={'X-CSRF-Token':new_csrf}).status_code,409)
+        self.assertFalse(self.store.writes)
+    def test_restored_read_workflows(self):
+        csrf=self.login().json()['csrf']
+        self.assertEqual(self.client.get('/api/classification?q=VOLT').status_code,200)
+        self.assertEqual(self.client.get('/api/trades/1/evidence').status_code,200)
+        self.assertEqual(self.client.post('/api/reconciliation',headers={'X-CSRF-Token':csrf},json={}).status_code,200)
+        self.assertFalse(self.store.writes)
+
     def test_static_security_and_manifest(self):
         r=self.client.get('/');self.assertIn("frame-ancestors 'none'",r.headers['content-security-policy'])
         manifest=self.client.get('/assets/manifest.webmanifest').json()

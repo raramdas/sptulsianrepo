@@ -141,7 +141,7 @@ def trades(status=None, category=None, symbol=None, date_from=None, date_to=None
         LEFT JOIN (SELECT trade_id, MAX(score_id) AS score_id
                      FROM conviction_scores GROUP BY trade_id) latest
                ON latest.trade_id = t.trade_id
-        LEFT JOIN conviction_scores c ON c.score_id = latest.score_id
+        LEFT JOIN conviction_scores c ON c.score_id = latest.score_id AND UPPER(c.symbol) = UPPER(t.symbol)
         WHERE 1=1
     """
     params = {}
@@ -175,7 +175,7 @@ def all_recommendations():
         LEFT JOIN (SELECT trade_id, MAX(score_id) AS score_id
                      FROM conviction_scores GROUP BY trade_id) latest
                ON latest.trade_id = t.trade_id
-        LEFT JOIN conviction_scores c ON c.score_id = latest.score_id
+        LEFT JOIN conviction_scores c ON c.score_id = latest.score_id AND UPPER(c.symbol) = UPPER(t.symbol)
         ORDER BY t.buy_date DESC, t.trade_id DESC
     """)
 
@@ -798,7 +798,7 @@ def conviction_latest():
 def conviction_for_trade(trade_id):
     """Full scoring history for one trade, newest first."""
     return _df("""
-        SELECT score_id, scored_at, score, evidence_pct, tier, verdict,
+        SELECT score_id, scored_at, model, score, evidence_pct, tier, verdict,
                sector, reasons, warnings, layers_json
         FROM conviction_scores
         WHERE trade_id = :tid

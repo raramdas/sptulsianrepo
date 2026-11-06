@@ -24,7 +24,9 @@ jobs:
           python3 test_write_operations.py
 
       - name: Trading safety regression tests (offline, broker write tripwires)
-        run: python3 tests/test_trading_safety.py
+        run: |
+          python3 tests/test_trading_safety.py
+          python3 tests/test_gtt_reconciliation.py
 
       - name: Mobile app authentication and data tests
         run: |

@@ -4,6 +4,10 @@ Run: uvicorn mobile_app:app --host 127.0.0.1 --port 8502 (from dashboard/).
 Uses the existing Oracle ledger and account snapshots; broker refresh is explicit.
 """
 from contextlib import closing
+import base64
+import csv
+import io
+import re
 import hashlib
 import hmac
 import importlib
@@ -51,6 +55,14 @@ class Budget(BaseModel):
     expected_amount: float = Field(ge=0, allow_inf_nan=False)
 
 
+class SymbolChoice(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40, pattern=r'^[A-Za-z0-9&.\-]+$')
+
+
+class SymbolConfirmation(BaseModel):
+    preview_token: str = Field(min_length=20, max_length=6000)
+
+
 def clean(value):
     """Portable JSON: preserve absent values and localise Oracle wall times."""
     if value is None or type(value).__name__ in ('NaTType', 'NAType'):
@@ -90,6 +102,36 @@ class OracleStore:
         result = importlib.import_module('kite_data').sync_now()
         return clean({account: ({'error': 'Refresh failed. Your previous snapshot is preserved.'}
                                if 'error' in value else value) for account, value in result.items()})
+
+    def symbol_preview(self, tid, symbol):
+        import requests
+        symbol=symbol.strip().upper()
+        rows=self.db.needs_review_trades()
+        match=rows[rows['trade_id']==tid]
+        if match.empty:raise HTTPException(409, 'This record is no longer awaiting symbol confirmation.')
+        response=requests.get('https://api.kite.trade/instruments/NSE',timeout=20)
+        response.raise_for_status()
+        instrument=next((r for r in csv.DictReader(io.StringIO(response.text))
+                         if r.get('tradingsymbol')==symbol and r.get('instrument_type')=='EQ' and r.get('exchange')=='NSE'),None)
+        if not instrument:raise HTTPException(422, 'No exact NSE equity symbol found. Check the spelling or use the classification lookup.')
+        row=match.iloc[0]
+        return clean(dict(trade_id=tid,stock_name=row['stock_name'],category=row['category_name'],
+                          symbol=symbol,company_name=instrument['name'],exchange='NSE',
+                          cap_type=self.db.get_stock_cap_type(symbol),recommended_price=row['recommended_price']))
+
+    def symbol_confirm(self, preview):
+        if self.db.resolve_needs_review(preview['trade_id'],preview['symbol'],preview['cap_type'])!=1:
+            raise HTTPException(409, 'This record changed or was already confirmed. Refresh the inbox.')
+
+    def classification(self, query):
+        return clean(self.db.lookup_symbol(query))
+
+    def evidence(self, tid):
+        return clean(self.db.conviction_for_trade(tid))
+
+    def reconcile(self):
+        from reconciliation import collect, analyse
+        return clean(analyse(collect(self.db, importlib.import_module('kite_data'))))
 
     def target(self, tid, change):
         conn = self.db.get_connection()
@@ -251,6 +293,47 @@ def create_app(store=None, users=None, secret=None, state_dir=None, secure=True)
             return {'accounts': data_store().refresh()}
         finally:
             refresh_lock.release()
+
+    @app.get('/api/classification')
+    def classification(request: Request, q: str=''):
+        identity(request)
+        if not 2 <= len(q.strip()) <= 100:raise HTTPException(422, 'Enter at least two characters.')
+        return {'matches':data_store().classification(q.strip())}
+
+    @app.get('/api/trades/{tid}/evidence')
+    def evidence(tid: int, request: Request):
+        identity(request)
+        return {'history':data_store().evidence(tid)}
+
+    @app.post('/api/trades/{tid}/symbol-preview')
+    def symbol_preview(tid: int, body: SymbolChoice, request: Request):
+        user=mutation(request)
+        preview=data_store().symbol_preview(tid,body.symbol)
+        payload=json.dumps({'preview':preview,'expires':time.time()+600,'session':user['token']},separators=(',',':')).encode()
+        encoded=base64.urlsafe_b64encode(payload).decode()
+        signature=hmac.new(key.encode(),encoded.encode(),hashlib.sha256).hexdigest()
+        return dict(**preview,preview_token=encoded+'.'+signature)
+
+    @app.post('/api/trades/{tid}/symbol-confirm')
+    def symbol_confirm(tid: int, body: SymbolConfirmation, request: Request):
+        user=mutation(request)
+        try:
+            encoded,signature=body.preview_token.rsplit('.',1)
+            expected=hmac.new(key.encode(),encoded.encode(),hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(signature,expected):raise ValueError()
+            payload=json.loads(base64.urlsafe_b64decode(encoded))
+            if payload['expires']<time.time() or payload['session']!=user['token'] or payload['preview']['trade_id']!=tid:raise ValueError()
+        except Exception:
+            raise HTTPException(409, 'This symbol preview expired or changed. Check the symbol again.')
+        data_store().symbol_confirm(payload['preview'])
+        return {'ok':True,'message':'Symbol confirmed. The normal scheduled buy checks still apply.'}
+
+    @app.post('/api/reconciliation')
+    def reconciliation(request: Request):
+        mutation(request)
+        if not refresh_lock.acquire(blocking=False):raise HTTPException(409, 'An account check is already running.')
+        try:return data_store().reconcile()
+        finally:refresh_lock.release()
 
     @app.put('/api/trades/{tid}/target')
     def target(tid: int, body: Target, request: Request):

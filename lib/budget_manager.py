@@ -725,7 +725,9 @@ def get_latest_conviction(trade_id):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT score, verdict, evidence_pct FROM conviction_scores
-            WHERE trade_id = :id AND model = :model ORDER BY score_id DESC FETCH FIRST 1 ROWS ONLY
+            WHERE trade_id = :id AND model = :model
+              AND UPPER(symbol) = (SELECT UPPER(symbol) FROM trades WHERE trade_id = :id)
+            ORDER BY score_id DESC FETCH FIRST 1 ROWS ONLY
         """, {'id': trade_id, 'model': SIZING_MODEL})
         row = cursor.fetchone()
         cursor.close()

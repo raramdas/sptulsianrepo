@@ -18,12 +18,17 @@ def available_delivery_quantity(symbol, exchange, holdings, positions, gtts, ord
     whether the holdings response has already incorporated that activity.
     """
     def matches(row):
-        return row.get('tradingsymbol') == symbol and row.get('exchange') == exchange
+        same_market = row.get('exchange') == exchange
+        cash_markets = exchange in ('NSE', 'BSE') and row.get('exchange') in ('NSE', 'BSE')
+        return row.get('tradingsymbol') == symbol and (same_market or cash_markets)
 
     if any(matches(p) and p.get('product') == 'CNC' and
            (float(p.get('quantity', 0)) or float(p.get('day_sell_quantity', 0))
             or float(p.get('day_buy_quantity', 0))) for p in positions):
         raise ValueError('Delivery position activity requires reconciliation')
+    matched_holdings = [h for h in holdings if matches(h)]
+    if len(matched_holdings) > 1:
+        raise ValueError('Multiple holding entries require identity reconciliation')
     inventory = 0
     for h in holdings:
         if not matches(h):
