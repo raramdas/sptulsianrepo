@@ -96,6 +96,18 @@ class Outcomes(unittest.TestCase):
 
 
 class Scores(unittest.TestCase):
+    def test_identity_conflict_and_test_rows_never_enter_scores(self):
+        s = snapshot(); p = prices()
+        p['excluded_recommendations'] = {'trade:1': 'name and ticker mismatch'}
+        recs, links = normalize(s)
+        rows, _ = evaluate_scores(s['tables']['conviction_scores'], recs, links,
+                                  Prices(p, '2026-05-01'), '^NSEI')
+        self.assertEqual(rows, [])
+        s['tables']['trades'][0]['status'] = 'DRY_RUN_TEST'
+        recs, links = normalize(s)
+        rows, _ = evaluate_scores(s['tables']['conviction_scores'], recs, links,
+                                  Prices(prices(), '2026-05-01'), '^NSEI')
+        self.assertEqual(rows, [])
     def test_stored_date_separate_models_not_latest_score(self):
         s = snapshot(); recs, links = normalize(s)
         rows, analysis = evaluate_scores(s['tables']['conviction_scores'], recs, links,
@@ -134,6 +146,26 @@ class Scores(unittest.TestCase):
 
 
 class Database(unittest.TestCase):
+    def test_broker_accounts_preserved_separately(self):
+        s = snapshot()
+        s['tables']['kite_holdings_snapshot'] = [
+            {'tradingsymbol':'ABC','account_label':account,'quantity':qty,'synced_at':'2026-01-01'}
+            for account, qty in [('OLD',10),('NEW',20)]]
+        with tempfile.TemporaryDirectory() as d:
+            path = str(Path(d)/'e.sqlite')
+            build(s, prices(), '2026-05-01', path)
+            with sqlite3.connect(path) as c:
+                self.assertEqual(c.execute('SELECT count(*) FROM broker_snapshots').fetchone()[0],2)
+
+    def test_test_and_identity_conflict_exclusions(self):
+        s = snapshot(); p = prices()
+        s['tables']['trades'][1]['status']='DRY_RUN_TEST'
+        p['excluded_recommendations']={'trade:1':'name/ticker conflict'}
+        with tempfile.TemporaryDirectory() as d:
+            report = build(s, p, '2026-05-01', str(Path(d)/'e.sqlite'))
+            self.assertEqual(report['baseline']['30']['all']['n'],0)
+            self.assertEqual(report['baseline']['30']['flags'],
+                             {'INSTRUMENT_IDENTITY_CONFLICT':1,'SYNTHETIC_SOURCE_RECORD':1})
     def test_idempotence_append_and_preservation(self):
         with tempfile.TemporaryDirectory() as d:
             path = str(Path(d)/'evidence.sqlite')
@@ -176,13 +208,15 @@ class Database(unittest.TestCase):
 
 class ReadOnlyExport(unittest.TestCase):
     def test_allowlist_and_rollback(self):
+        class Lob:
+            def read(self): return 'ABC'
         class Cursor:
             def execute(self, sql):
                 calls.append(sql)
                 if sql.startswith('SELECT table_name'):
                     self.rows = [('TRADES','TRADE_ID','NUMBER'),('TRADES','SYMBOL','VARCHAR2')]
                 elif sql.startswith('SELECT trade_id'):
-                    self.rows = [(1,'ABC')]
+                    self.rows = [(1,Lob())]
             def fetchone(self): return [dt.datetime(2026,1,1)]
             def fetchall(self): return self.rows
             def __iter__(self): return iter(self.rows)

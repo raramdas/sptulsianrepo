@@ -14,7 +14,7 @@ import random
 import sqlite3
 import statistics as st
 
-VERSION = '1.0'
+VERSION = '1.2'
 HORIZONS = (30, 90, 180, 365)
 
 
@@ -121,6 +121,8 @@ class Prices:
                 or self.payload.get('calendar_verified') is not True):
             flags.append('MISSING_SESSION_CALENDAR'); return out
         future = [d for d in self.calendar if d > signal]
+        if signal >= self.as_of:
+            flags.append('RIGHT_CENSORED'); return out
         if not future or (future[0] - signal).days > 7:
             flags.append('MISSING_ENTRY_SESSION'); return out
         entry = future[0]  # date-only signals: next-session close, never same-day hindsight
@@ -204,6 +206,10 @@ CREATE TABLE IF NOT EXISTS score_outcomes (
  run_id TEXT, score_id TEXT, horizon_days INTEGER, payload_json TEXT,
  PRIMARY KEY(run_id,score_id,horizon_days),
  FOREIGN KEY(run_id,score_id) REFERENCES model_scores);
+CREATE TABLE IF NOT EXISTS broker_snapshots (
+ run_id TEXT REFERENCES runs, snapshot_type TEXT, account_label TEXT, source_id TEXT,
+ synced_at TEXT, payload_json TEXT,
+ PRIMARY KEY(run_id,snapshot_type,account_label,source_id));
 '''
 
 
@@ -265,6 +271,10 @@ def evaluate_scores(scores, recs, links, prices, benchmark):
         rid = links.get(str(s.get('trade_id')))
         model = s.get('model') or 'unknown'
         r = recs.get(rid)
+        if rid in prices.payload.get('excluded_recommendations', {}):
+            continue
+        if r and r.get('status') == 'DRY_RUN_TEST':
+            continue
         value = number(s.get('score'))
         if not r or value is None or not 0 <= value <= 100 or model == 'unknown':
             continue
@@ -319,6 +329,11 @@ def build(snapshot, price_payload, as_of, db_path, benchmark='^NSEI'):
         raise ValueError('Explicit ISO as-of date required')
     prices = Prices(price_payload, as_of)
     recs, links = normalize(snapshot)
+    for rid, rec in recs.items():
+        if rid in price_payload.get('excluded_recommendations', {}):
+            rec['flags'].append('INSTRUMENT_IDENTITY_CONFLICT')
+        if rec.get('status') == 'DRY_RUN_TEST':
+            rec['flags'].append('SYNTHETIC_SOURCE_RECORD')
     manifest = {'version': VERSION, 'as_of': as_of, 'snapshot_hash': digest(snapshot),
                 'price_hash': digest(price_payload), 'benchmark': benchmark,
                 'horizons_calendar_days': HORIZONS, 'entry_rule': 'next_session_close',
@@ -329,7 +344,12 @@ def build(snapshot, price_payload, as_of, db_path, benchmark='^NSEI'):
     outcomes = []
     for rid, r in sorted(recs.items()):
         for horizon in HORIZONS:
-            if str(r.get('spt_direction') or 'Buy').lower() != 'buy':
+            if r.get('status') == 'DRY_RUN_TEST':
+                out = {'return': None, 'flags': ['SYNTHETIC_SOURCE_RECORD']}
+            elif rid in price_payload.get('excluded_recommendations', {}):
+                out = {'return': None, 'flags': ['INSTRUMENT_IDENTITY_CONFLICT'],
+                       'exclusion_reason': price_payload['excluded_recommendations'][rid]}
+            elif str(r.get('spt_direction') or 'Buy').lower() != 'buy':
                 out = {'return': None, 'flags': ['NON_BUY_ADVISORY']}
             else:
                 out = prices.outcome(r.get('symbol'), r.get('recommended_at'), horizon)
@@ -358,6 +378,12 @@ def build(snapshot, price_payload, as_of, db_path, benchmark='^NSEI'):
                          canonical(['EFFECTIVE_DATE_UNKNOWN', 'NOT_PROVEN_ORIGINAL_TARGET'])))
                 for tid, rid in links.items():
                     conn.execute('INSERT INTO trade_links VALUES (?,?,?)', (run,tid,rid))
+                for table, key in [('kite_holdings_snapshot','tradingsymbol'),
+                                   ('kite_orders_snapshot','order_id'), ('kite_gtt_snapshot','gtt_id')]:
+                    for item in snapshot['tables'].get(table, []):
+                        conn.execute('INSERT INTO broker_snapshots VALUES (?,?,?,?,?,?)',
+                            (run,table,item.get('account_label') or 'UNKNOWN',str(item[key]),
+                             item.get('synced_at'),canonical(item)))
                 for s in snapshot['tables'].get('conviction_scores', []):
                     rid = links.get(str(s.get('trade_id')))
                     flags = ['MODEL_VERSION_UNKNOWN'] + ([] if rid else ['UNLINKED_SCORE'])
@@ -383,6 +409,12 @@ def build(snapshot, price_payload, as_of, db_path, benchmark='^NSEI'):
                             ret = sp/bp-1
                     else:
                         flags.append('NO_CONFIRMED_LEDGER_BUY')
+                    if t.get('status') == 'Closed' and ret is None:
+                        flags.append('CLOSED_OUTCOME_UNRESOLVED')
+                        if sq is None or sp is None or not day(t.get('my_sell_date')):
+                            flags.append('MISSING_EXIT_DETAILS')
+                        if sq is not None and bq is not None and sq != bq:
+                            flags.append('BUY_SELL_QUANTITY_MISMATCH')
                     conn.execute('INSERT INTO holdings VALUES (?,?,?,?,?)',
                                  (run,tid,t.get('symbol'),qty,canonical(flags)))
                     conn.execute('INSERT INTO realized_outcomes VALUES (?,?,?,?)',
@@ -412,17 +444,40 @@ def build(snapshot, price_payload, as_of, db_path, benchmark='^NSEI'):
             'worst_individual_drawdown': min(o['max_drawdown'] for o in valid) if valid else None,
             'milestone_rates': {str(m): sum(o['milestones'][str(m)]['hit'] for o in valid)/len(valid)
                                 if valid else None for m in (1.5,2,3,5)}}
+        first_by_symbol = {}
+        for o in sorted(selected, key=lambda o: (str(recs[o['recommendation_id']].get('recommended_at') or ''),
+                                                  o['recommendation_id'])):
+            rec = recs[o['recommendation_id']]
+            if (rec.get('symbol') and day(rec.get('recommended_at'))
+                    and not set(o['flags']) & {'SYNTHETIC_SOURCE_RECORD','INSTRUMENT_IDENTITY_CONFLICT','NON_BUY_ADVISORY'}):
+                first_by_symbol.setdefault(rec['symbol'], o)
+        groups[str(horizon)]['first_observation_per_symbol'] = {
+            'eligible_symbols': len(first_by_symbol),
+            **summary([o['return'] for o in first_by_symbol.values()])}
         for dimension in ('category_name', 'have_interest', 'stock_type', 'repeat_status'):
             buckets = defaultdict(list)
             for o in selected:
                 buckets[recs[o['recommendation_id']].get(dimension) or 'UNKNOWN'].append(o['return'])
             groups[str(horizon)][dimension] = {k: summary(v) for k, v in sorted(buckets.items())}
+    source_trades = snapshot['tables'].get('trades', [])
+    broker_freshness = {}
+    for table in ('kite_holdings_snapshot', 'kite_orders_snapshot', 'kite_gtt_snapshot'):
+        dates = sorted({r.get('synced_at') for r in snapshot['tables'].get(table, []) if r.get('synced_at')})
+        latest = dates[-1] if dates else None
+        age = (day(as_of) - day(latest)).days if day(latest) else None
+        broker_freshness[table] = {'latest_sync': latest, 'age_calendar_days': age,
+                                  'flag': 'STALE_SNAPSHOT' if age is not None and age > 0 else
+                                          'MISSING_SNAPSHOT' if age is None else 'SAME_DAY_NOT_REALTIME'}
     return {'run_id': run, 'manifest': manifest,
             'source_counts': {k: len(v) for k, v in snapshot['tables'].items()},
             'score_coverage': {'stored_rows': len(snapshot['tables'].get('conviction_scores', [])),
                                'selected_first_scores': len({r['score_id'] for r in score_rows}),
                                'selection': 'first valid stored score per recommendation/model; later scores retained but not tested'},
             'recommendations': len(recs), 'baseline': groups,
+            'data_quality': {'execution_statuses': dict(Counter(t.get('status') for t in source_trades)),
+                             'broker_snapshot_freshness': broker_freshness,
+                             'closed_records': sum(t.get('status') == 'Closed' for t in source_trades),
+                             'usable_closed_records': sum(v is not None for v in realized)},
             'realized_ledger_only': summary(realized), 'predictive': predictive,
             'recommendation_flags': dict(Counter(f for r in recs.values() for f in r['flags'])),
             'status': 'BASELINE_COMPUTED' if any(o['return'] is not None for o in outcomes)
@@ -457,6 +512,12 @@ def report_markdown(report):
     for h, data in report['baseline'].items():
         s = data['all']
         lines.append(f"| {h} | {s['n']} | {data['total_observations']} | {pct(s['mean_return'])} | {pct(s['median_return'])} | {pct(s['win_rate'])} |")
+    lines += ['', '### Sensitivity: first observation per stock', '',
+              '| Calendar days | Complete stocks | Eligible stocks | Mean | Median | Win rate |',
+              '|---|---:|---:|---:|---:|---:|']
+    for h, data in report['baseline'].items():
+        s = data['first_observation_per_symbol']
+        lines.append(f"| {h} | {s['n']} | {s['eligible_symbols']} | {pct(s['mean_return'])} | {pct(s['median_return'])} | {pct(s['win_rate'])} |")
     lines += ['', '## Existing-score predictive power', '',
               'First scored observation per symbol and model; excess return over the configured benchmark.']
     if not report['predictive']:
@@ -465,7 +526,8 @@ def report_markdown(report):
         lines += ['', f"### {key}", '', f"Symbols with matched outcomes: {data['n_symbols']} / {data['eligible_symbols']}",
                   f"Spearman correlation: {data['spearman']}; bootstrap 95% interval: {data['bootstrap_95pct']}"]
     lines += ['', '## Data-quality flags', '', '```json',
-              json.dumps({'recommendations': report['recommendation_flags'],
+              json.dumps({'source_quality': report['data_quality'],
+                          'recommendations': report['recommendation_flags'],
                           'outcomes': {h: d['flags'] for h, d in report['baseline'].items()}}, indent=2), '```',
               '', '## Interpretation limits', '']
     lines += ['- ' + x for x in report['limitations']]

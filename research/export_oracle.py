@@ -20,6 +20,12 @@ TABLES = {
     'CONVICTION_SCORES': ('score_id', '''trade_id symbol stock_name category_name
         scored_at score evidence_pct tier verdict sector reasons warnings layers_json
         model reach_z'''.split()),
+    'KITE_HOLDINGS_SNAPSHOT': ('tradingsymbol', '''account_label quantity average_price
+        last_price pnl synced_at'''.split()),
+    'KITE_ORDERS_SNAPSHOT': ('order_id', '''account_label order_timestamp tradingsymbol
+        transaction_type order_type quantity filled_quantity price average_price status synced_at'''.split()),
+    'KITE_GTT_SNAPSHOT': ('gtt_id', '''account_label symbol status trigger_price last_price
+        quantity sell_price created_at expires_at synced_at'''.split()),
 }
 
 
@@ -29,9 +35,9 @@ def extract(conn):
     try:
         cur.execute('SELECT SYSTIMESTAMP FROM dual')
         captured = cur.fetchone()[0].isoformat()
+        literals = ','.join("'" + name + "'" for name in TABLES)
         cur.execute("SELECT table_name, column_name, data_type FROM user_tab_columns "
-                    "WHERE table_name IN ('TRADES','RECOMMENDATIONS','CONVICTION_SCORES') "
-                    "ORDER BY table_name, column_id")
+                    f"WHERE table_name IN ({literals}) ORDER BY table_name, column_id")
         schema = cur.fetchall()
         result = {'format_version': 1, 'captured_at': captured,
                   'source': 'oracle_read_only', 'schema': schema, 'tables': {}, 'missing': []}
@@ -43,7 +49,10 @@ def extract(conn):
             cols = [pk] + [x for x in optional if x in available]
             # Identifiers originate exclusively in the static allowlist above.
             cur.execute(f"SELECT {','.join(cols)} FROM {table} ORDER BY {pk}")
-            result['tables'][table.lower()] = [dict(zip(cols, row)) for row in cur]
+            # Materialize CLOBs while the connection is still open.
+            result['tables'][table.lower()] = [
+                dict(zip(cols, [v.read() if hasattr(v, 'read') else v for v in row]))
+                for row in cur]
         if 'trades' not in result['tables']:
             raise ValueError('TRADES is unavailable in the connected schema; no snapshot produced')
         return result

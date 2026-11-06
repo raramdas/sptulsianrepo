@@ -4,10 +4,12 @@ Inspection date: 2026-11-06 (Asia/Kolkata).
 Source repository: `raramdas/sptulsianrepo`.
 Inspected base commit: `be1cad03813ae9d5531f7a3292179fc6e3d74440`.
 
-**Live baseline: blocked by Oracle server reachability.** No Oracle rows,
-historical price series, sample sizes or new predictive findings have been
-obtained. This report is a repository inspection, not an investment backtest.
-Synthetic test fixtures must never be interpreted as portfolio observations.
+**Live baseline completed on 2026-11-06.** Oracle access was restored after
+initial SSH timeouts. The actual schema was inspected and a read-only snapshot
+was extracted. Historical adjusted prices were acquired using reviewed NSE
+instrument identities and the official NSE session calendar. Private outputs
+are kept under ignored `research/private/`; no portfolio rows or performance
+figures are published in this public repository.
 
 ## Findings from source code
 
@@ -38,8 +40,8 @@ Synthetic test fixtures must never be interpreted as portfolio observations.
    support a historical return or conviction-predictive baseline.
 8. Oracle credentials and wallet are documented as server-local, outside Git.
    The local SSH key matches the user-provided fingerprint, but the documented
-   IP and hostname timed out before authentication. No reconciliation or
-   provisioning script was executed.
+   IP and hostname initially timed out before authentication; the route later
+   became reachable. No reconciliation or provisioning script was executed.
 
 ## Implemented scope
 
@@ -52,23 +54,44 @@ Synthetic test fixtures must never be interpreted as portfolio observations.
 - Deterministic reports keyed by input hashes; no live trading imports.
 - Offline regression tests and a dedicated CI step.
 
-Validation completed: 14 offline research tests, 20 existing dashboard checks
+Validation completed: 17 offline research tests, 20 existing dashboard checks
 and 10 existing write-operation mock checks passed. Research modules compile.
-These checks use synthetic data and mocks; they do not validate connectivity,
-live schema compatibility or actual price-provider coverage.
+The tests use synthetic data and mocks. Separately, the exporter was exercised
+against live Oracle and the baseline was built from actual frozen data.
 
-## Outstanding validation
+## Live-schema findings
 
-1. Restore a reachable Oracle/SSH route, inspect actual live schema and data,
-   and extract a transactionally consistent snapshot.
-2. Reconcile source coverage and recommendation identities against the complete
-   advisory archive; preserve skipped, unbought and delisted securities.
-3. Review symbol mappings and acquire an independently verified session calendar
-   plus adjusted historical prices, preferably a matching total-return benchmark.
-4. Run the reproducible baseline, inspect missingness and sample concentration,
-   and report supported findings or explicit insufficiency.
-5. Validate source-specific execution fields and partial-fill semantics before
-   treating ledger outcomes or quantities as broker-confirmed positions.
+- The separate RECOMMENDATIONS table is empty and the live TRADES table lacks
+  rec_id. The evidence base therefore uses explicitly flagged trade-derived
+  observations, rather than claiming a complete advisory archive.
+- Broker holdings, orders and GTT snapshot tables exist. They are captured
+  separately by account with sync timestamps; stale snapshots are flagged.
+- CLOB score evidence must be read before closing the Oracle connection.
+  The exporter and regression test now enforce this.
+- Name/ticker conflicts and test records are present in the source ledger.
+  Reviewed exclusions apply to recommendation and predictive outcomes without
+  editing or deleting source records.
+- Some Closed rows lack exits or contain unequal buy/sell quantities. These
+  are retained and flagged, with realized returns left unavailable.
+- History is too short for 180/365-day recommendation outcomes or 90-day stored
+  score outcomes. These remain right-censored rather than scored as failures.
+- No source database DDL/DML was executed; all Oracle reads used read-only
+  transactions. The separate local evidence database contains the results.
+
+## Remaining evidence limitations
+
+1. The complete historical SPTulsian archive is not represented in the live
+   trade-derived sample. Longer histories, omitted recommendations and delisted
+   names need separate verified sources before a multi-year strategy is tested.
+2. Original target revision dates, historical valuation/fundamentals, stop losses
+   and stable model version identifiers remain unavailable.
+3. The default benchmark is a price index, not total return. The report labels
+   this mismatch explicitly and makes no matched-alpha claim.
+4. Gross ledger returns and broker snapshots do not constitute a reconciled
+   cashflow-based portfolio backtest. Partial fills and account linkage need
+   additional verified evidence.
+5. Existing-score diagnostics are exploratory. No HC scoring weights, position
+   sizes or investment policy were optimized or validated by this run.
 
 No source database schema, live orders, scheduled jobs, score thresholds or
 existing trading behavior has been modified.

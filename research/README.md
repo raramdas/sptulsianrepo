@@ -7,10 +7,11 @@ production access. There is deliberately no production schema migration.
 
 ## Status
 
-Implementation and offline tests are available. **The live baseline has not
-been run.** See [inspection report](INSPECTION_REPORT.md). A reachable Oracle
-connection, historical price coverage, reviewed instrument mappings, and a
-verified exchange calendar are still required to produce actual findings.
+The live Oracle extraction and baseline were run on 2026-11-06. See the
+[inspection report](INSPECTION_REPORT.md). Generated portfolio data and findings
+remain under ignored `research/private/`; they are intentionally not published
+in this public repository. Tests cover both offline calculations and the
+schema/LOB issues discovered during the live run.
 
 ## Reproduce
 
@@ -26,6 +27,7 @@ python3 -m research.export_oracle --env-file /home/ubuntu/.env \
 python3 -m research.fetch_prices \
   --mapping research/private/instruments.json \
   --calendar research/private/calendar.json \
+  --exclusions research/private/identity-exclusions.json \
   --start 2020-01-01 --end 2026-11-07 \
   --out research/private/prices-2026-11-06.json
 
@@ -47,7 +49,9 @@ Do not run provisioning or reconciliation scripts as part of research.
 
 The exporter starts with `SET TRANSACTION READ ONLY`, inspects actual columns,
 then selects only an explicit field allowlist from TRADES, RECOMMENDATIONS and
-CONVICTION_SCORES in that same transaction. It rolls back and closes. Missing
+CONVICTION_SCORES plus the three KITE holdings/orders/GTT snapshot tables in
+that same transaction. CLOB values are materialized before closing Oracle.
+It rolls back and closes. Missing
 optional tables are recorded; missing TRADES fails. It does not query credentials
 or tenant configuration. Oracle schema synonyms are not auto-discovered: if
 shared tables live elsewhere, inspect grants and add a reviewed mapping first.
@@ -76,6 +80,7 @@ public, so never publish private holdings, order IDs, snapshots, or live reports
 | research_outcomes | Per-observation 30/90/180/365-calendar-day outcome and missing-data flags |
 | score_outcomes | Forward outcomes starting after the first recorded score per recommendation/model |
 | runs | Input hashes, parameters, capture date and methodology version |
+| broker_snapshots | Broker snapshots retained by account and source ID, with sync timestamps; never treated as live holdings |
 
 Repeated symbol/date rows are retained, flagged and not silently collapsed.
 An explicit rec_id is authoritative. Without it, the trade remains a separate
@@ -85,6 +90,10 @@ revised it. Initial targets and stop losses are never reconstructed from current
 target values. Source status is not converted into investment success/failure.
 Missing advisory direction is flagged and evaluated as a hypothetical long-only
 return proxy; explicit sell calls are excluded from long-return analysis.
+`DRY_RUN_TEST` records and reviewed name/ticker conflicts are excluded from
+recommendation and score outcomes while their source rows are retained.
+Broker snapshot age is reported explicitly. Accounts are never combined to
+infer a trade fill; the root ledger has no proven account-level link.
 
 ## Price input contract
 
@@ -100,6 +109,10 @@ return proxy; explicit sell calls are excluded from long-return analysis.
 This is a format example, not a completed mapping for the portfolio. Review
 exchange, company identity, name changes, mergers and delistings. Missing or
 unverified identities remain missing; no automatic `.NS` suffix inference.
+An optional exclusions file is a JSON object mapping recommendation IDs such as
+`trade:123` to review reasons. This handles a source row whose name conflicts
+with an otherwise valid ticker. It is embedded in the frozen price payload,
+hashed with the inputs and applied to both recommendation and score outcomes.
 
 `calendar.json` contains **all** exchange sessions covering the sample:
 
@@ -148,6 +161,8 @@ and excluded from denominators rather than filled forward or assigned zero.
   have been edited after the recommendation: they are descriptive, not proven
   point-in-time predictors. Sector, valuation and fundamental analyses are
   withheld until dated evidence is available.
+- First-observation-per-stock sensitivity selects each stock's first eligible
+  record before checking outcome maturity, to expose repeated-lot weighting.
 
 Gross ledger returns require Closed status, positive matching buy/sell quantities,
 valid prices and ordered dates; future closes relative to as-of are excluded.

@@ -51,10 +51,13 @@ def main():
     p.add_argument('--start', required=True)
     p.add_argument('--end', required=True, help='Exclusive date')
     p.add_argument('--out', required=True)
+    p.add_argument('--exclusions', help='Reviewed recommendation-id to reason JSON; retained in price provenance')
     a = p.parse_args()
     if Path(a.out).exists():
         raise FileExistsError(a.out)
     result = fetch(json.loads(Path(a.mapping).read_text()), json.loads(Path(a.calendar).read_text()), a.start, a.end)
+    if a.exclusions:
+        result['excluded_recommendations'] = json.loads(Path(a.exclusions).read_text())
     with open(a.out, 'x') as f:
         json.dump(result, f, sort_keys=True, allow_nan=False)
     print(json.dumps({'series': len(result['series']), 'errors': result['errors']}))
